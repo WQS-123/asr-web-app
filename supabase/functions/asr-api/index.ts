@@ -377,7 +377,9 @@ const handleAuth = async (request: Request) => {
 
 const handleRequest = async (request: Request) => {
   const url = new URL(request.url);
-  const path = url.pathname.replace(/^\/functions\/v1\/asr-api/, "") || "/";
+  const path = url.pathname
+    .replace(/^\/functions\/v1\/asr-api/, "")
+    .replace(/^\/asr-api/, "") || "/";
   if (path !== "/api/auth") {
     const authError = requireAuth(request);
     if (authError) return authError;

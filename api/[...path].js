@@ -12,12 +12,8 @@ const readBody = async (request) => {
 
 export default async function handler(request, response) {
   const functionUrl = process.env.SUPABASE_FUNCTION_URL || "https://nsysrnnnbvodxgoooyoj.supabase.co/functions/v1/asr-api";
-  if (!functionUrl) {
-    response.status(500).json({ error: "Missing SUPABASE_FUNCTION_URL." });
-    return;
-  }
-
-  const path = Array.isArray(request.query.path) ? request.query.path.join("/") : "";
+  const requestUrl = new URL(request.url, `https://${request.headers.host || "localhost"}`);
+  const path = requestUrl.pathname.replace(/^\/api\/?/, "");
   const target = new URL(`${functionUrl.replace(/\/$/, "")}/api/${path}`);
   for (const [key, value] of Object.entries(request.query)) {
     if (key === "path") continue;
