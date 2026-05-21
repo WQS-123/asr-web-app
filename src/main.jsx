@@ -426,7 +426,7 @@ function App() {
       const job = await edgeRequest("/api/realtime/start", { method: "POST", body: form });
       setCurrentJob(job);
       setActiveJobId(job.id);
-      setStatus(job.status === "error" ? (job.asrError || "转录失败") : "转录已完成");
+      setStatus(job.status === "error" ? (job.asrError || "转录失败") : "转录任务已提交，云端处理中...");
       await refreshState();
     } catch (error) {
       setStatus(error.message || "转录启动失败");

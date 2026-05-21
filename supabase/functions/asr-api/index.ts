@@ -10,6 +10,7 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ||
   "";
 const DASH_SCOPE_API_KEY = Deno.env.get("DASHSCOPE_API_KEY") || "";
 const DASH_SCOPE_BASE_URL = (Deno.env.get("DASHSCOPE_BASE_URL") || "https://dashscope.aliyuncs.com").replace(/\/$/, "");
+const DASH_SCOPE_TASK_BASE_URL = (Deno.env.get("DASHSCOPE_TASK_BASE_URL") || "https://dashscope.aliyuncs.com/api/v1").replace(/\/$/, "");
 const AI_DEFAULT_BASE_URL = (Deno.env.get("AI_BASE_URL") || "https://api.deepseek.com").replace(/\/$/, "");
 const AI_DEFAULT_MODEL = Deno.env.get("AI_MODEL") || "deepseek-chat";
 const PUBLIC_PASSWORD = Deno.env.get("PUBLIC_PASSWORD") || "";
@@ -18,6 +19,7 @@ const AUTH_TOKEN = Deno.env.get("PUBLIC_AUTH_TOKEN") || crypto.randomUUID();
 const AUDIO_BUCKET = "audio-uploads";
 const STATE_ID = "default";
 const MAX_BASE64_BYTES = Number(Deno.env.get("ASR_MAX_BASE64_BYTES") || 7 * 1024 * 1024);
+const ASR_SIGNED_URL_SECONDS = Number(Deno.env.get("ASR_SIGNED_URL_SECONDS") || 24 * 60 * 60);
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
@@ -234,6 +236,165 @@ const transcribeAudio = async (audioBytes: Uint8Array, mimeType: string, duratio
   const text = payload?.choices?.[0]?.message?.content || "";
   if (!text.trim()) throw new Error("DashScope 没有返回转录文本。");
   return textToTimedSegments(text, durationSeconds, segmentSeconds);
+};
+
+const dashscopeHeaders = (extra: HeadersInit = {}) => ({
+  authorization: `Bearer ${DASH_SCOPE_API_KEY}`,
+  "content-type": "application/json",
+  ...extra,
+});
+
+const ensureDashScopeKey = () => {
+  if (!DASH_SCOPE_API_KEY) throw new Error("缺少 DASHSCOPE_API_KEY。");
+};
+
+const submitDashScopeFileTask = async (fileUrl: string) => {
+  ensureDashScopeKey();
+  const response = await fetch(`${DASH_SCOPE_TASK_BASE_URL}/services/audio/asr/transcription`, {
+    method: "POST",
+    headers: dashscopeHeaders({ "X-DashScope-Async": "enable" }),
+    body: JSON.stringify({
+      model: "qwen3-asr-flash-filetrans",
+      input: { file_url: fileUrl },
+      parameters: { enable_itn: true },
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.message || payload?.error?.message || JSON.stringify(payload).slice(0, 500));
+  const taskId = payload?.output?.task_id || payload?.task_id || "";
+  if (!taskId) throw new Error(`DashScope 没有返回 task_id：${JSON.stringify(payload).slice(0, 500)}`);
+  return {
+    taskId,
+    taskStatus: payload?.output?.task_status || "PENDING",
+    raw: payload,
+  };
+};
+
+const fetchDashScopeTask = async (taskId: string) => {
+  ensureDashScopeKey();
+  const response = await fetch(`${DASH_SCOPE_TASK_BASE_URL}/tasks/${encodeURIComponent(taskId)}`, {
+    headers: dashscopeHeaders(),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.message || payload?.error?.message || JSON.stringify(payload).slice(0, 500));
+  return payload;
+};
+
+const readDashScopeResult = async (taskPayload: AnyRecord) => {
+  const resultUrl = taskPayload?.output?.results?.[0]?.transcription_url ||
+    taskPayload?.output?.result?.transcription_url ||
+    taskPayload?.output?.transcription_url ||
+    "";
+  if (!resultUrl) throw new Error(`DashScope 任务完成但没有返回 transcription_url：${JSON.stringify(taskPayload).slice(0, 500)}`);
+  const response = await fetch(resultUrl);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.message || JSON.stringify(payload).slice(0, 500));
+  return payload;
+};
+
+const secondsFromMs = (value: unknown) => {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.round((number / 1000) * 100) / 100;
+};
+
+const dashScopeResultToSegments = (payload: AnyRecord, durationSeconds: number, segmentSeconds: number, topic: AnyRecord) => {
+  const transcripts = Array.isArray(payload?.transcripts) ? payload.transcripts : [];
+  const segments = transcripts.flatMap((transcript: AnyRecord) => {
+    const sentences = Array.isArray(transcript?.sentences) ? transcript.sentences : [];
+    if (sentences.length) {
+      return sentences.map((sentence: AnyRecord, index: number) => ({
+        start: secondsFromMs(sentence.begin_time ?? sentence.start_time ?? sentence.start),
+        end: secondsFromMs(sentence.end_time ?? sentence.end),
+        text: applyGlossary(String(sentence.text || sentence.sentence || "").trim(), topic),
+        channelId: transcript.channel_id ?? transcript.channelId,
+        index,
+      })).filter((segment: AnyRecord) => segment.text);
+    }
+    const text = String(transcript?.text || "").trim();
+    return text ? textToTimedSegments(text, durationSeconds, segmentSeconds) : [];
+  });
+  const normalized = segments
+    .map((segment: AnyRecord, index: number) => ({
+      start: Number(segment.start) || 0,
+      end: Number(segment.end) || Number(segment.start) || 0,
+      text: String(segment.text || "").trim(),
+      channelId: segment.channelId,
+      index,
+    }))
+    .filter((segment: AnyRecord) => segment.text)
+    .sort((left: AnyRecord, right: AnyRecord) => left.start - right.start || left.index - right.index)
+    .map((segment: AnyRecord, index: number, list: AnyRecord[]) => ({
+      start: segment.start,
+      end: segment.end > segment.start ? segment.end : (list[index + 1]?.start || segment.start + 1),
+      text: segment.text,
+      ...(segment.channelId === undefined ? {} : { channelId: segment.channelId }),
+    }));
+  if (normalized.length) return normalized;
+  const text = transcripts.map((transcript: AnyRecord) => transcript?.text || "").join(" ").trim();
+  return textToTimedSegments(applyGlossary(text, topic), durationSeconds, segmentSeconds);
+};
+
+const completeDashScopeJob = async (job: AnyRecord, taskPayload: AnyRecord) => {
+  const state = await readState();
+  const doc = findDoc(state, job.docId || "");
+  if (!doc) throw new Error("Document not found");
+  const topic = findTopic(state, doc.topicId) || {};
+  const result = await readDashScopeResult(taskPayload);
+  const segments = dashScopeResultToSegments(result, Number(job.durationSeconds || doc.durationSeconds || 0), Number(job.segmentSeconds || 30), topic);
+  doc.segments = segments;
+  doc.finalText = polishFromSegments(segments, topic);
+  doc.asrStatus = "realtime";
+  doc.asrProvider = "dashscope";
+  doc.asrError = "";
+  await writeState(state);
+  const doneJob = {
+    ...job,
+    status: "done",
+    stage: "done",
+    completedSegments: segments,
+    asrError: "",
+    dashscopeOutput: taskPayload.output || {},
+    updatedAt: new Date().toISOString(),
+  };
+  return writeJob(doneJob);
+};
+
+const failDashScopeJob = async (job: AnyRecord, message: string, taskPayload: AnyRecord = {}) => {
+  const state = await readState();
+  const doc = findDoc(state, job.docId || "");
+  if (doc) {
+    doc.asrStatus = "error";
+    doc.asrError = message;
+    await writeState(state);
+  }
+  return writeJob({
+    ...job,
+    status: "error",
+    stage: "error",
+    asrError: message,
+    dashscopeOutput: taskPayload.output || {},
+    updatedAt: new Date().toISOString(),
+  });
+};
+
+const refreshDashScopeJob = async (job: AnyRecord) => {
+  if (!job.dashscopeTaskId || !["running", "pending"].includes(String(job.status || "").toLowerCase())) return job;
+  const taskPayload = await fetchDashScopeTask(job.dashscopeTaskId);
+  const taskStatus = String(taskPayload?.output?.task_status || taskPayload?.task_status || "").toUpperCase();
+  if (taskStatus === "SUCCEEDED") return completeDashScopeJob(job, taskPayload);
+  if (["FAILED", "CANCELED", "UNKNOWN"].includes(taskStatus)) {
+    const message = taskPayload?.output?.message || taskPayload?.message || taskPayload?.code || `DashScope 任务失败：${taskStatus}`;
+    return failDashScopeJob(job, message, taskPayload);
+  }
+  return writeJob({
+    ...job,
+    status: "running",
+    stage: taskStatus ? `dashscope_${taskStatus.toLowerCase()}` : "dashscope_transcribing",
+    dashscopeStatus: taskStatus || "RUNNING",
+    dashscopeOutput: taskPayload.output || {},
+    updatedAt: new Date().toISOString(),
+  });
 };
 
 const extractJsonObject = (text: string) => {
@@ -466,9 +627,7 @@ const handleRequest = async (request: Request) => {
     const doc = findDoc(state, String(form.get("docId") || ""));
     if (!doc) return json({ error: "Document not found" }, 404);
     const storagePath = doc.storagePath || doc.audioUrl;
-    const downloaded = await supabase.storage.from(AUDIO_BUCKET).download(storagePath);
-    if (downloaded.error || !downloaded.data) throw downloaded.error || new Error("Audio download failed");
-    const bytes = new Uint8Array(await downloaded.data.arrayBuffer());
+    if (!storagePath) return json({ error: "Audio file not found" }, 404);
     doc.asrStatus = "running";
     doc.asrError = "";
     doc.segments = [];
@@ -477,7 +636,7 @@ const handleRequest = async (request: Request) => {
     const baseJob = {
       id: jobId,
       status: "running",
-      stage: "dashscope_sync",
+      stage: "dashscope_submit",
       docId: doc.id,
       topicId: doc.topicId,
       segmentSeconds: Number(form.get("segmentSeconds") || 30),
@@ -491,34 +650,23 @@ const handleRequest = async (request: Request) => {
     };
     await writeJob(baseJob);
     try {
-      const segments = await transcribeAudio(bytes, downloaded.data.type, Number(form.get("durationSeconds") || doc.durationSeconds || 0), Number(form.get("segmentSeconds") || 30));
-      doc.segments = segments;
-      doc.finalText = polishFromSegments(segments, findTopic(state, doc.topicId) || {});
-      doc.asrStatus = "realtime";
-      doc.asrProvider = "dashscope";
-      await writeState(state);
-      const doneJob = {
+      const signed = await supabase.storage.from(AUDIO_BUCKET).createSignedUrl(storagePath, ASR_SIGNED_URL_SECONDS);
+      if (signed.error || !signed.data?.signedUrl) throw signed.error || new Error("Audio signed URL failed");
+      const task = await submitDashScopeFileTask(signed.data.signedUrl);
+      const runningJob = {
         ...baseJob,
-        status: "done",
-        stage: "done",
-        completedSegments: segments,
+        status: "running",
+        stage: "dashscope_transcribing",
+        dashscopeTaskId: task.taskId,
+        dashscopeStatus: task.taskStatus,
+        dashscopeOutput: task.raw?.output || {},
         updatedAt: new Date().toISOString(),
       };
-      await writeJob(doneJob);
-      return json(doneJob, 201);
+      await writeJob(runningJob);
+      return json(runningJob, 202);
     } catch (error) {
-      doc.asrStatus = "error";
-      doc.asrError = error instanceof Error ? error.message : String(error);
-      await writeState(state);
-      const errorJob = {
-        ...baseJob,
-        status: "error",
-        asrError: doc.asrError,
-        completedSegments: [],
-        updatedAt: new Date().toISOString(),
-      };
-      await writeJob(errorJob);
-      return json(errorJob, 201);
+      const failedJob = await failDashScopeJob(baseJob, error instanceof Error ? error.message : String(error));
+      return json(failedJob, 201);
     }
   }
 
@@ -526,7 +674,7 @@ const handleRequest = async (request: Request) => {
     const jobId = url.searchParams.get("jobId") || "";
     const job = jobId ? await readJob(jobId) : null;
     if (!job) return json({ error: "Realtime job not found" }, 404);
-    return json(job);
+    return json(await refreshDashScopeJob(job));
   }
 
   if (request.method === "POST" && ["/api/realtime/pause", "/api/realtime/resume", "/api/realtime/cancel"].includes(path)) {
@@ -540,7 +688,7 @@ const handleRequest = async (request: Request) => {
     }
     if (path.endsWith("/resume") && job.status === "paused") {
       job.status = "running";
-      job.stage = "dashscope_sync";
+      job.stage = job.dashscopeTaskId ? "dashscope_transcribing" : "dashscope_submit";
     }
     if (path.endsWith("/cancel")) {
       job.status = "canceled";
