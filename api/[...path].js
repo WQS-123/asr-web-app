@@ -11,7 +11,7 @@ const readBody = async (request) => {
 };
 
 export default async function handler(request, response) {
-  const functionUrl = process.env.SUPABASE_FUNCTION_URL;
+  const functionUrl = process.env.SUPABASE_FUNCTION_URL || "https://nsysrnnnbvodxgoooyoj.supabase.co/functions/v1/asr-api";
   if (!functionUrl) {
     response.status(500).json({ error: "Missing SUPABASE_FUNCTION_URL." });
     return;
