@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import "./styles.css";
 
 const AI_SETTINGS_KEY = "asr-review-studio-ai-settings-v1";
 const THEME_KEY = "asr-review-studio-theme-v1";

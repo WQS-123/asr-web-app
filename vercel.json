@@ -1,14 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "functions": {
     "api/[...path].js": {
       "maxDuration": 60
     }
-  },
-  "rewrites": [
-    {
-      "source": "/data/uploads/:path*",
-      "destination": "/api/storage/:path*"
-    }
-  ]
+  }
 }
