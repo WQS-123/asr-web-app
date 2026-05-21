@@ -14,7 +14,13 @@ const SUPABASE_FUNCTION_URL = "https://nsysrnnnbvodxgoooyoj.supabase.co/function
 const apiRequest = async (path, options = {}) => {
   const response = await fetch(path, options);
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    const preview = text.replace(/\s+/g, " ").trim().slice(0, 140);
+    throw new Error(preview ? `接口没有返回 JSON：${preview}` : "接口没有返回 JSON。");
+  }
   if (!response.ok) {
     const error = new Error(payload.error || `${response.status} ${response.statusText}`);
     error.status = response.status;
@@ -24,6 +30,7 @@ const apiRequest = async (path, options = {}) => {
 };
 
 const edgeRequest = (path, options = {}) => apiRequest(`${SUPABASE_FUNCTION_URL}${path}`, options);
+const appRequest = edgeRequest;
 
 const uploadFormWithProgress = (url, form, onProgress) => new Promise((resolve, reject) => {
   const request = new XMLHttpRequest();
@@ -121,7 +128,7 @@ function App() {
 
   const refreshState = async () => {
     try {
-      const payload = await apiRequest("/api/state");
+      const payload = await appRequest("/api/state");
       setState(payload);
       setActiveDocId((current) => current || payload.selectedDocId || "");
       setTargetDocument(payload.targetDocument || "");
@@ -146,7 +153,7 @@ function App() {
     if (!activeJobId) return undefined;
     const poll = window.setInterval(async () => {
       try {
-        const job = await apiRequest(`/api/realtime?jobId=${encodeURIComponent(activeJobId)}`);
+        const job = await appRequest(`/api/realtime?jobId=${encodeURIComponent(activeJobId)}`);
         setCurrentJob(job);
         setStatus(jobStatusLabel(job));
         await refreshState();
@@ -180,7 +187,7 @@ function App() {
   const updateState = async (nextState) => {
     setState(nextState);
     try {
-      const saved = await apiRequest("/api/state", {
+      const saved = await appRequest("/api/state", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(nextState)
@@ -239,7 +246,7 @@ function App() {
     setModal("");
     setTopicDraft({ name: "", context: "" });
     try {
-      const payload = await apiRequest("/api/topics", {
+      const payload = await appRequest("/api/topics", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(topicDraft)
@@ -253,7 +260,7 @@ function App() {
   };
 
   const saveDoc = async (docId, fields) => {
-    const payload = await apiRequest(`/api/docs/${encodeURIComponent(docId)}`, {
+    const payload = await appRequest(`/api/docs/${encodeURIComponent(docId)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(fields)
@@ -268,7 +275,7 @@ function App() {
   };
 
   const saveTopic = async (topicId, fields) => {
-    const payload = await apiRequest(`/api/topics/${encodeURIComponent(topicId)}`, {
+    const payload = await appRequest(`/api/topics/${encodeURIComponent(topicId)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(fields)
@@ -293,7 +300,7 @@ function App() {
     if (!window.confirm(`删除文件夹「${topic.name}」及其中所有文件？`)) return;
     setStatus("文件夹删除中...");
     try {
-      const payload = await apiRequest(`/api/topics/${encodeURIComponent(topic.id)}`, { method: "DELETE" });
+      const payload = await appRequest(`/api/topics/${encodeURIComponent(topic.id)}`, { method: "DELETE" });
       setState(payload);
       if (activeDoc?.topicId === topic.id) setActiveDocId("");
       setStatus("文件夹已删除");
@@ -304,7 +311,7 @@ function App() {
 
   const deleteDoc = async (doc) => {
     if (!window.confirm(`删除文件「${doc.title}」？`)) return;
-    const payload = await apiRequest(`/api/docs/${encodeURIComponent(doc.id)}`, { method: "DELETE" });
+    const payload = await appRequest(`/api/docs/${encodeURIComponent(doc.id)}`, { method: "DELETE" });
     setState(payload);
     if (activeDocId === doc.id) setActiveDocId("");
     setStatus("文件已删除");
@@ -316,6 +323,27 @@ function App() {
     setDragDocId("");
     setDragOverDocId("");
     setDragOverTopicId("");
+  };
+
+  const moveDocWithPicker = async (doc) => {
+    const availableTopics = topics.filter((topic) => topic.id !== doc.topicId);
+    if (!availableTopics.length) {
+      setStatus("没有其他文件夹可移动");
+      return;
+    }
+    const options = availableTopics.map((topic, index) => `${index + 1}. ${topic.name}`).join("\n");
+    const choice = window.prompt(`移动「${doc.title}」到哪个文件夹？\n${options}`, "1");
+    if (!choice) return;
+    const targetIndex = Number(choice) - 1;
+    const target = availableTopics[targetIndex];
+    if (!target) {
+      setStatus("没有找到对应的目标文件夹");
+      return;
+    }
+    setStatus("文件移动中...");
+    await moveDocToTopic(doc.id, target.id);
+    setActiveDocId(doc.id);
+    setStatus(`已移动到「${target.name}」`);
   };
 
   const reorderDoc = async (targetDocId, targetTopicId) => {
@@ -409,7 +437,7 @@ function App() {
 
   const pauseRealtime = async () => {
     if (!activeJobId) return;
-    const job = await apiRequest("/api/realtime/pause", {
+    const job = await appRequest("/api/realtime/pause", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jobId: activeJobId })
@@ -421,7 +449,7 @@ function App() {
 
   const resumeRealtime = async () => {
     if (!activeJobId) return;
-    const job = await apiRequest("/api/realtime/resume", {
+    const job = await appRequest("/api/realtime/resume", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jobId: activeJobId })
@@ -433,7 +461,7 @@ function App() {
 
   const cancelRealtime = async () => {
     if (!activeJobId) return;
-    const job = await apiRequest("/api/realtime/cancel", {
+    const job = await appRequest("/api/realtime/cancel", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jobId: activeJobId })
@@ -447,7 +475,7 @@ function App() {
   const restartRealtime = async () => {
     if (!activeDoc?.audioUrl) return;
     if (activeJobId) {
-      await apiRequest("/api/realtime/cancel", {
+      await appRequest("/api/realtime/cancel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobId: activeJobId })
@@ -472,7 +500,7 @@ function App() {
     }
     setStatus(`${mode === "file" ? "File" : "Context"} 校准中...`);
     try {
-      const result = await apiRequest(`/api/calibrate/${mode}`, {
+      const result = await appRequest(`/api/calibrate/${mode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -493,7 +521,7 @@ function App() {
 
   const createSuggestions = async () => {
     if (!activeDoc) return;
-    const payload = await apiRequest("/api/suggestions", {
+    const payload = await appRequest("/api/suggestions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ docId: activeDoc.id, targetDocument })
@@ -596,7 +624,10 @@ function App() {
               onDragLeave={() => {
                 if (dragOverTopicId === topic.id) setDragOverTopicId("");
               }}
-              onDrop={() => dragDocId ? moveDocToTopic(dragDocId, topic.id) : reorderTopic(topic.id)}
+              onDrop={(event) => {
+                event.preventDefault();
+                dragDocId ? moveDocToTopic(dragDocId, topic.id) : reorderTopic(topic.id);
+              }}
             >
               <div className={`react-folder-row ${topic.id === activeTopic?.id ? "active" : ""} ${isTopicCollapsed ? "collapsed" : ""} ${dragOverTopicId === topic.id ? "drop-target" : ""}`}>
                 <button onClick={() => selectTopic(topic)} onDoubleClick={() => renameTopic(topic)} aria-expanded={!isTopicCollapsed}>
@@ -671,6 +702,7 @@ function App() {
                       <Icon name="more" />
                     </button>
                     <div className="react-row-menu-panel">
+                      <button onClick={(event) => { event.stopPropagation(); setOpenRowMenu(""); moveDocWithPicker(doc); }}><Icon name="move" />移动到...</button>
                       <button onClick={(event) => { event.stopPropagation(); setOpenRowMenu(""); renameDoc(doc); }}><Icon name="edit" />重命名</button>
                       <button className="danger" onClick={(event) => { event.stopPropagation(); setOpenRowMenu(""); deleteDoc(doc); }}><Icon name="trash" />删除</button>
                     </div>
@@ -886,6 +918,14 @@ function Icon({ name }) {
       <>
         <path d="M3 7h7l2 2h9v10H3Z" />
         <path d="M3 7v12" />
+      </>
+    ),
+    move: (
+      <>
+        <path d="M5 9h10" />
+        <path d="m12 6 3 3-3 3" />
+        <path d="M19 15H9" />
+        <path d="m12 12-3 3 3 3" />
       </>
     )
   };
