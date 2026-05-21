@@ -1,0 +1,11 @@
+.git
+.vercel
+.runtime
+.env
+.env.*
+data
+dist
+node_modules
+__pycache__
+*.pyc
+supabase/.branches

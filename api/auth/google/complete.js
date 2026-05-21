@@ -13,13 +13,7 @@ const readBody = async (request) => {
 export default async function handler(request, response) {
   const functionUrl = process.env.SUPABASE_FUNCTION_URL || "https://nsysrnnnbvodxgoooyoj.supabase.co/functions/v1/asr-api";
   const requestUrl = new URL(request.url, `https://${request.headers.host || "localhost"}`);
-  const path = requestUrl.pathname.replace(/^\/api\/?/, "");
-  const target = new URL(`${functionUrl.replace(/\/$/, "")}/api/${path}`);
-  for (const [key, value] of Object.entries(request.query)) {
-    if (key === "path") continue;
-    if (Array.isArray(value)) value.forEach((item) => target.searchParams.append(key, item));
-    else if (value !== undefined) target.searchParams.set(key, value);
-  }
+  const target = new URL(`${functionUrl.replace(/\/$/, "")}/api/auth/google/complete`);
 
   const headers = { ...request.headers };
   delete headers.host;

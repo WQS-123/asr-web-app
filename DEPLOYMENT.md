@@ -36,6 +36,22 @@ supabase secrets set --project-ref <project-ref> \
   DEEPSEEK_API_KEY='<deepseek-key>'
 ```
 
+Google login:
+
+1. In Google Cloud OAuth, add this authorized redirect URI:
+
+```text
+https://<project-ref>.supabase.co/auth/v1/callback
+```
+
+2. In Supabase Auth Providers, enable Google with the Google OAuth client ID and secret.
+3. In Supabase Auth URL configuration, add app redirect URLs:
+
+```text
+https://asr-web-app.vercel.app/auth/google/callback
+http://127.0.0.1:5174/auth/google/callback
+```
+
 4. Deploy the function:
 
 ```bash
