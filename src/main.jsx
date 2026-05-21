@@ -9,6 +9,7 @@ const DEFAULT_AI_SETTINGS = {
   baseUrl: "https://api.deepseek.com",
   model: "deepseek-chat"
 };
+const SUPABASE_FUNCTION_URL = "https://nsysrnnnbvodxgoooyoj.supabase.co/functions/v1/asr-api";
 
 const apiRequest = async (path, options = {}) => {
   const response = await fetch(path, options);
@@ -21,6 +22,8 @@ const apiRequest = async (path, options = {}) => {
   }
   return payload;
 };
+
+const edgeRequest = (path, options = {}) => apiRequest(`${SUPABASE_FUNCTION_URL}${path}`, options);
 
 const formatTime = (totalSeconds = 0) => {
   const hours = Math.floor(totalSeconds / 3600);
@@ -190,15 +193,34 @@ function App() {
 
   const createTopic = async (event) => {
     event.preventDefault();
-    const payload = await apiRequest("/api/topics", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(topicDraft)
-    });
-    setState(payload);
-    setTopicDraft({ name: "", context: "" });
+    const draft = {
+      id: `topic-pending-${Date.now()}`,
+      name: topicDraft.name.trim() || "Untitled",
+      context: topicDraft.context.trim(),
+      glossary: {}
+    };
+    setState((current) => ({
+      ...current,
+      topics: [draft, ...(current?.topics || [])],
+      selectedTopicId: draft.id,
+      selectedDocId: "",
+      expandedTopicIds: [...new Set([...(current?.expandedTopicIds || []), draft.id])]
+    }));
+    setStatus("文件夹创建中...");
     setModal("");
-    setStatus("文件夹已创建");
+    setTopicDraft({ name: "", context: "" });
+    try {
+      const payload = await apiRequest("/api/topics", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(topicDraft)
+      });
+      setState(payload);
+      setStatus("文件夹已创建");
+    } catch (error) {
+      setStatus(`文件夹创建失败：${error.message}`);
+      await refreshState();
+    }
   };
 
   const saveDoc = async (docId, fields) => {
@@ -294,16 +316,21 @@ function App() {
   const importAudio = async (event) => {
     event.preventDefault();
     if (!importDraft.file || !importDraft.topicId) return;
+    setStatus("音频导入中...");
     const form = new FormData();
     form.append("topicId", importDraft.topicId);
     form.append("audio", importDraft.file);
     if (importDraft.durationSeconds) form.append("durationSeconds", importDraft.durationSeconds);
-    const result = await apiRequest("/api/audio/import", { method: "POST", body: form });
-    setState(result.state);
-    setActiveDocId(result.doc.id);
-    setImportDraft({ topicId: importDraft.topicId, file: null, durationSeconds: "" });
-    setModal("");
-    setStatus("音频已导入");
+    try {
+      const result = await edgeRequest("/api/audio/import", { method: "POST", body: form });
+      setState(result.state);
+      setActiveDocId(result.doc.id);
+      setImportDraft({ topicId: importDraft.topicId, file: null, durationSeconds: "" });
+      setModal("");
+      setStatus("音频已导入");
+    } catch (error) {
+      setStatus(`音频导入失败：${error.message}`);
+    }
   };
 
   const startRealtime = async () => {
@@ -519,7 +546,7 @@ function App() {
               onDrop={() => dragDocId ? moveDocToTopic(dragDocId, topic.id) : reorderTopic(topic.id)}
             >
               <div className={`react-folder-row ${topic.id === activeTopic?.id ? "active" : ""} ${isTopicCollapsed ? "collapsed" : ""} ${dragOverTopicId === topic.id ? "drop-target" : ""}`}>
-                <button onClick={() => toggleTopicCollapsed(topic.id)} onDoubleClick={() => renameTopic(topic)} aria-expanded={!isTopicCollapsed}>
+                <button onClick={() => selectTopic(topic)} onDoubleClick={() => renameTopic(topic)} aria-expanded={!isTopicCollapsed}>
                   <span className="folder-glyph" />
                   <strong>{topic.name}</strong>
                   <small>{(docsByTopic.get(topic.id) || []).length}</small>
@@ -539,6 +566,7 @@ function App() {
                     <Icon name="more" />
                   </button>
                   <div className="react-row-menu-panel">
+                    <button onClick={(event) => { event.stopPropagation(); setOpenRowMenu(""); toggleTopicCollapsed(topic.id); }}><Icon name="folder" />{isTopicCollapsed ? "展开" : "收起"}</button>
                     <button onClick={(event) => { event.stopPropagation(); setOpenRowMenu(""); renameTopic(topic); }}><Icon name="edit" />重命名</button>
                     <button className="danger" onClick={(event) => { event.stopPropagation(); setOpenRowMenu(""); deleteTopic(topic); }}><Icon name="trash" />删除</button>
                   </div>
@@ -793,6 +821,12 @@ function Icon({ name }) {
         <circle cx="5" cy="12" r="1.4" />
         <circle cx="12" cy="12" r="1.4" />
         <circle cx="19" cy="12" r="1.4" />
+      </>
+    ),
+    folder: (
+      <>
+        <path d="M3 7h7l2 2h9v10H3Z" />
+        <path d="M3 7v12" />
       </>
     )
   };

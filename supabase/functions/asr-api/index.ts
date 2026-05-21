@@ -18,6 +18,11 @@ const AUTH_TOKEN = Deno.env.get("PUBLIC_AUTH_TOKEN") || crypto.randomUUID();
 const AUDIO_BUCKET = "audio-uploads";
 const STATE_ID = "default";
 const MAX_BASE64_BYTES = Number(Deno.env.get("ASR_MAX_BASE64_BYTES") || 7 * 1024 * 1024);
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
+  "access-control-allow-headers": "authorization,content-type",
+};
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
@@ -45,6 +50,7 @@ const json = (data: unknown, status = 200, headers: HeadersInit = {}) =>
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
+      ...CORS_HEADERS,
       ...headers,
     },
   });
@@ -380,6 +386,7 @@ const handleRequest = async (request: Request) => {
   const path = url.pathname
     .replace(/^\/functions\/v1\/asr-api/, "")
     .replace(/^\/asr-api/, "") || "/";
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
   if (path !== "/api/auth") {
     const authError = requireAuth(request);
     if (authError) return authError;
