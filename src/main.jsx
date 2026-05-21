@@ -25,6 +25,32 @@ const apiRequest = async (path, options = {}) => {
 
 const edgeRequest = (path, options = {}) => apiRequest(`${SUPABASE_FUNCTION_URL}${path}`, options);
 
+const uploadFormWithProgress = (url, form, onProgress) => new Promise((resolve, reject) => {
+  const request = new XMLHttpRequest();
+  request.open("POST", url);
+  request.upload.onprogress = (event) => {
+    if (!event.lengthComputable) return;
+    onProgress(Math.round((event.loaded / event.total) * 100));
+  };
+  request.onload = () => {
+    let payload = {};
+    try {
+      payload = request.responseText ? JSON.parse(request.responseText) : {};
+    } catch {
+      payload = {};
+    }
+    if (request.status >= 200 && request.status < 300) {
+      resolve(payload);
+      return;
+    }
+    const error = new Error(payload.error || `${request.status} ${request.statusText}`);
+    error.status = request.status;
+    reject(error);
+  };
+  request.onerror = () => reject(new Error("网络连接失败，音频没有上传成功。"));
+  request.send(form);
+});
+
 const formatTime = (totalSeconds = 0) => {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -67,6 +93,9 @@ function App() {
   const [activeDocId, setActiveDocId] = useState("");
   const [status, setStatus] = useState("Ready");
   const [modal, setModal] = useState("");
+  const [importProgress, setImportProgress] = useState(0);
+  const [isImporting, setIsImporting] = useState(false);
+  const [asrBusy, setAsrBusy] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
   const [authPassword, setAuthPassword] = useState("");
   const [topicDraft, setTopicDraft] = useState({ name: "", context: "" });
@@ -262,10 +291,15 @@ function App() {
 
   const deleteTopic = async (topic) => {
     if (!window.confirm(`删除文件夹「${topic.name}」及其中所有文件？`)) return;
-    const payload = await apiRequest(`/api/topics/${encodeURIComponent(topic.id)}`, { method: "DELETE" });
-    setState(payload);
-    if (activeDoc?.topicId === topic.id) setActiveDocId("");
-    setStatus("文件夹已删除");
+    setStatus("文件夹删除中...");
+    try {
+      const payload = await apiRequest(`/api/topics/${encodeURIComponent(topic.id)}`, { method: "DELETE" });
+      setState(payload);
+      if (activeDoc?.topicId === topic.id) setActiveDocId("");
+      setStatus("文件夹已删除");
+    } catch (error) {
+      setStatus(`文件夹删除失败：${error.message}`);
+    }
   };
 
   const deleteDoc = async (doc) => {
@@ -316,13 +350,18 @@ function App() {
   const importAudio = async (event) => {
     event.preventDefault();
     if (!importDraft.file || !importDraft.topicId) return;
+    setIsImporting(true);
+    setImportProgress(0);
     setStatus("音频导入中...");
     const form = new FormData();
     form.append("topicId", importDraft.topicId);
     form.append("audio", importDraft.file);
     if (importDraft.durationSeconds) form.append("durationSeconds", importDraft.durationSeconds);
     try {
-      const result = await edgeRequest("/api/audio/import", { method: "POST", body: form });
+      const result = await uploadFormWithProgress(`${SUPABASE_FUNCTION_URL}/api/audio/import`, form, (progress) => {
+        setImportProgress(progress);
+        setStatus(`音频上传中 ${progress}%`);
+      });
       setState(result.state);
       setActiveDocId(result.doc.id);
       setImportDraft({ topicId: importDraft.topicId, file: null, durationSeconds: "" });
@@ -330,6 +369,8 @@ function App() {
       setStatus("音频已导入");
     } catch (error) {
       setStatus(`音频导入失败：${error.message}`);
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -338,19 +379,31 @@ function App() {
       setStatus("请先选择一个音频文件");
       return;
     }
+    setAsrBusy(true);
+    setCurrentJob({
+      id: "pending-asr",
+      docId: activeDoc.id,
+      status: "running",
+      stage: "uploading_to_asr",
+      completedSegments: [],
+      plannedSegments: [{ start: 0, end: activeDoc.durationSeconds || 0 }]
+    });
+    setStatus("ASR 启动中，请稍等...");
     const form = new FormData();
     form.append("docId", activeDoc.id);
     form.append("topicId", activeDoc.topicId);
     form.append("segmentSeconds", String(segmentSeconds));
     form.append("durationSeconds", String(activeDoc.durationSeconds || 0));
     try {
-      const job = await apiRequest("/api/realtime/start", { method: "POST", body: form });
+      const job = await edgeRequest("/api/realtime/start", { method: "POST", body: form });
       setCurrentJob(job);
       setActiveJobId(job.id);
-      setStatus("转录已开始");
+      setStatus(job.status === "error" ? (job.asrError || "转录失败") : "转录已完成");
       await refreshState();
     } catch (error) {
       setStatus(error.message || "转录启动失败");
+    } finally {
+      setAsrBusy(false);
     }
   };
 
@@ -525,7 +578,7 @@ function App() {
             <section
               key={topic.id}
               className="react-folder"
-              draggable
+              draggable={!openRowMenu}
               onDragStart={() => {
                 setDragTopicId(topic.id);
                 setDragDocId("");
@@ -557,8 +610,8 @@ function App() {
                     className="react-row-menu-trigger"
                     title="更多"
                     aria-label={`${topic.name} 更多操作`}
-                    onClick={(event) => event.stopPropagation()}
-                    onMouseDown={(event) => {
+                    onClick={(event) => {
+                      event.preventDefault();
                       event.stopPropagation();
                       setOpenRowMenu(openRowMenu === `topic-${topic.id}` ? "" : `topic-${topic.id}`);
                     }}
@@ -609,8 +662,8 @@ function App() {
                       className="react-row-menu-trigger"
                       title="更多"
                       aria-label={`${doc.title} 更多操作`}
-                      onClick={(event) => event.stopPropagation()}
-                      onMouseDown={(event) => {
+                      onClick={(event) => {
+                        event.preventDefault();
                         event.stopPropagation();
                         setOpenRowMenu(openRowMenu === `doc-${doc.id}` ? "" : `doc-${doc.id}`);
                       }}
@@ -644,14 +697,14 @@ function App() {
           </div>
           <div className="react-asr-controls">
             <label>片段秒数<input type="number" min="5" max="300" step="5" value={segmentSeconds} onChange={(event) => setSegmentSeconds(Number(event.target.value) || 30)} /></label>
-            {!activeJobId && !showRestart && <button className="react-primary" disabled={!activeDoc?.audioUrl || isAsrActive(activeDoc)} onClick={startRealtime}>Start ASR</button>}
+            {!activeJobId && !showRestart && <button className="react-primary" disabled={!activeDoc?.audioUrl || isAsrActive(activeDoc) || asrBusy} onClick={startRealtime}>{asrBusy ? "ASR..." : "Start ASR"}</button>}
             {activeJobId && activeJobStatus !== "paused" && <button className="react-primary" onClick={pauseRealtime}>Pause</button>}
             {activeJobId && activeJobStatus === "paused" && <button className="react-primary" onClick={resumeRealtime}>Continue</button>}
             {showRestart && <button onClick={restartRealtime} disabled={!activeDoc?.audioUrl}>Restart</button>}
           </div>
-          <div className={`react-asr-progress ${activeJobId ? "active" : ""}`} aria-live="polite">
+          <div className={`react-asr-progress ${activeJobId || asrBusy ? "active" : ""}`} aria-live="polite">
               <strong>{asrProgressTitle(jobForActiveDoc, activeDoc)}</strong>
-              <span>{asrProgressDetail(jobForActiveDoc, activeDoc)}</span>
+              <span>{status || asrProgressDetail(jobForActiveDoc, activeDoc)}</span>
           </div>
         </header>
 
@@ -719,7 +772,13 @@ function App() {
             </select></label>
             <label>音频文件<input type="file" accept="audio/*,.m4a,.mp3,.wav,.aac" onChange={(event) => setImportDraft({ ...importDraft, file: event.target.files?.[0] || null })} /></label>
             <label>时长秒数<input type="number" min="0" value={importDraft.durationSeconds} onChange={(event) => setImportDraft({ ...importDraft, durationSeconds: event.target.value })} /></label>
-            <button className="react-primary" type="submit" disabled={!importDraft.file}>导入</button>
+            {isImporting && (
+              <div className="react-upload-progress" aria-live="polite">
+                <progress max="100" value={importProgress} />
+                <span>上传中 {importProgress}%</span>
+              </div>
+            )}
+            <button className="react-primary" type="submit" disabled={!importDraft.file || isImporting}>{isImporting ? "导入中..." : "导入"}</button>
           </form>
         </Modal>
       )}

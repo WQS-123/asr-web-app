@@ -427,7 +427,7 @@ textarea {
 
 .react-topbar {
   display: grid;
-  grid-template-columns: minmax(180px, 0.95fr) minmax(320px, 1.2fr) minmax(190px, 0.95fr) minmax(220px, 0.95fr);
+  grid-template-columns: minmax(160px, 0.7fr) minmax(520px, 2.1fr) minmax(170px, 0.65fr) minmax(190px, 0.7fr);
   align-items: center;
   gap: 12px;
   border-bottom-right-radius: 0;
@@ -482,6 +482,7 @@ textarea {
 
 .react-topbar-audio audio {
   display: block;
+  min-width: 0;
   width: 100%;
   height: 34px;
 }
@@ -698,6 +699,24 @@ textarea {
 
 .react-form textarea {
   min-height: 220px;
+}
+
+.react-upload-progress {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 10px;
+}
+
+.react-upload-progress progress {
+  width: 100%;
+  height: 10px;
+  accent-color: var(--accent);
 }
 
 .react-suggestions textarea {
