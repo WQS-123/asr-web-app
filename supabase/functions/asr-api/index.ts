@@ -15,6 +15,7 @@ const AI_DEFAULT_BASE_URL = (Deno.env.get("AI_BASE_URL") || "https://api.deepsee
 const AI_DEFAULT_MODEL = Deno.env.get("AI_MODEL") || "deepseek-chat";
 const PUBLIC_PASSWORD = Deno.env.get("PUBLIC_PASSWORD") || "";
 const AUTH_COOKIE_NAME = "asr_public_auth";
+const USER_COOKIE_NAME = "asr_user_id";
 const AUTH_TOKEN = Deno.env.get("PUBLIC_AUTH_TOKEN") || crypto.randomUUID();
 const AUDIO_BUCKET = "audio-uploads";
 const STATE_ID = "default";
@@ -47,15 +48,18 @@ const defaultState = (): AnyRecord => ({
   suggestions: [],
 });
 
-const json = (data: unknown, status = 200, headers: HeadersInit = {}) =>
-  new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      ...CORS_HEADERS,
-      ...headers,
-    },
+const json = (data: unknown, status = 200, headers: HeadersInit = {}) => {
+  const responseHeaders = new Headers({
+    "content-type": "application/json; charset=utf-8",
+    ...CORS_HEADERS,
   });
+  if (Array.isArray(headers)) {
+    headers.forEach(([key, value]) => responseHeaders.append(key, value));
+  } else {
+    new Headers(headers).forEach((value, key) => responseHeaders.append(key, value));
+  }
+  return new Response(JSON.stringify(data), { status, headers: responseHeaders });
+};
 
 const parseCookie = (request: Request) => {
   const cookie = request.headers.get("cookie") || "";
@@ -67,6 +71,23 @@ const parseCookie = (request: Request) => {
   );
 };
 
+const normalizeUserId = (value: unknown) => {
+  const normalized = String(value || "default")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return normalized || "default";
+};
+
+const stateIdForUser = (userId: string) => userId === "default" ? STATE_ID : `user:${userId}`;
+
+const stateIdFromRequest = (request: Request) => {
+  const cookies = parseCookie(request);
+  return stateIdForUser(normalizeUserId(cookies[USER_COOKIE_NAME]));
+};
+
 const requireAuth = (request: Request) => {
   if (!PUBLIC_PASSWORD) return null;
   const cookies = parseCookie(request);
@@ -74,17 +95,17 @@ const requireAuth = (request: Request) => {
   return json({ error: "需要访问密码。" }, 401);
 };
 
-const readState = async () => {
-  const { data, error } = await supabase.from("app_state").select("state").eq("id", STATE_ID).maybeSingle();
+const readState = async (stateId = STATE_ID) => {
+  const { data, error } = await supabase.from("app_state").select("state").eq("id", stateId).maybeSingle();
   if (error) throw error;
   if (data?.state) return withSignedAudioUrls(data.state as AnyRecord);
   const state = defaultState();
-  await writeState(state);
+  await writeState(state, stateId);
   return withSignedAudioUrls(state);
 };
 
-const writeState = async (state: AnyRecord) => {
-  const { error } = await supabase.from("app_state").upsert({ id: STATE_ID, state });
+const writeState = async (state: AnyRecord, stateId = STATE_ID) => {
+  const { error } = await supabase.from("app_state").upsert({ id: stateId, state });
   if (error) throw error;
   return state;
 };
@@ -144,9 +165,11 @@ const applyGlossary = (text: string, topic: AnyRecord) => {
   return output;
 };
 
+const stripReviewMarkers = (text: string) => text.replaceAll("（已检查）", "").trim();
+
 const cleanedSegments = (segments: AnyRecord[], topic: AnyRecord) => segments.map((segment) => ({
   ...segment,
-  text: applyGlossary(String(segment.text || ""), topic),
+  text: stripReviewMarkers(applyGlossary(String(segment.text || ""), topic)),
 }));
 
 const polishFromSegments = (segments: AnyRecord[], topic: AnyRecord = { name: "", glossary: {} }) => {
@@ -162,6 +185,7 @@ const docReadyForCalibration = (doc: AnyRecord) => {
 const buildDoc = (fileName: string, topic: AnyRecord, audioUrl: string, durationSeconds = 0, title = "") => ({
   id: `doc-${crypto.randomUUID().slice(0, 12)}`,
   topicId: topic.id,
+  docType: "transcript",
   title: title.trim() || fileName.replace(/\.[^.]+$/, "") || "untitled-audio",
   createdAt: new Date().toISOString(),
   audioName: fileName,
@@ -172,6 +196,21 @@ const buildDoc = (fileName: string, topic: AnyRecord, audioUrl: string, duration
   finalText: "",
   asrStatus: "ready",
   asrError: "",
+});
+
+const buildFileCalibratedDoc = (source: AnyRecord, segments: AnyRecord[], finalText: string) => ({
+  ...source,
+  id: `doc-${crypto.randomUUID().slice(0, 12)}`,
+  docType: "file-calibrated",
+  sourceDocId: source.id,
+  title: `${source.title || "untitled-audio"} · File 校准`,
+  createdAt: new Date().toISOString(),
+  segments,
+  finalText,
+  asrStatus: "file-calibrated",
+  asrError: "",
+  calibrationMode: "file",
+  fileCalibratedAt: new Date().toISOString(),
 });
 
 const textToTimedSegments = (text: string, durationSeconds: number, segmentSeconds: number) => {
@@ -336,7 +375,7 @@ const dashScopeResultToSegments = (payload: AnyRecord, durationSeconds: number, 
 };
 
 const completeDashScopeJob = async (job: AnyRecord, taskPayload: AnyRecord) => {
-  const state = await readState();
+  const state = await readState(job.stateId || STATE_ID);
   const doc = findDoc(state, job.docId || "");
   if (!doc) throw new Error("Document not found");
   const topic = findTopic(state, doc.topicId) || {};
@@ -347,7 +386,7 @@ const completeDashScopeJob = async (job: AnyRecord, taskPayload: AnyRecord) => {
   doc.asrStatus = "realtime";
   doc.asrProvider = "dashscope";
   doc.asrError = "";
-  await writeState(state);
+  await writeState(state, job.stateId || STATE_ID);
   const doneJob = {
     ...job,
     status: "done",
@@ -361,12 +400,12 @@ const completeDashScopeJob = async (job: AnyRecord, taskPayload: AnyRecord) => {
 };
 
 const failDashScopeJob = async (job: AnyRecord, message: string, taskPayload: AnyRecord = {}) => {
-  const state = await readState();
+  const state = await readState(job.stateId || STATE_ID);
   const doc = findDoc(state, job.docId || "");
   if (doc) {
     doc.asrStatus = "error";
     doc.asrError = message;
-    await writeState(state);
+    await writeState(state, job.stateId || STATE_ID);
   }
   return writeJob({
     ...job,
@@ -453,7 +492,7 @@ const normalizeAiSegments = (inputSegments: AnyRecord[], aiSegments: unknown, to
   return inputSegments.map((source, index) => ({
     start: source.start || 0,
     end: source.end || 0,
-    text: String((aiSegments[index] as AnyRecord)?.text || "").trim() || applyGlossary(String(source.text || ""), topic),
+    text: stripReviewMarkers(String((aiSegments[index] as AnyRecord)?.text || "").trim() || applyGlossary(String(source.text || ""), topic)),
   }));
 };
 
@@ -530,13 +569,17 @@ const makeSuggestions = (target: string, doc: AnyRecord, topic: AnyRecord) => {
 };
 
 const handleAuth = async (request: Request) => {
-  if (!PUBLIC_PASSWORD) return json({ ok: true, authRequired: false });
   const payload = await request.json().catch(() => ({}));
-  if (payload.password === PUBLIC_PASSWORD) {
+  const userId = normalizeUserId(payload.userId || payload.username || payload.email);
+  if (!PUBLIC_PASSWORD || payload.password === PUBLIC_PASSWORD) {
+    const secureCookie = new URL(request.url).protocol === "https:" ? "; Secure" : "";
     return json(
-      { ok: true, authRequired: true },
+      { ok: true, authRequired: Boolean(PUBLIC_PASSWORD), userId },
       200,
-      { "set-cookie": `${AUTH_COOKIE_NAME}=${AUTH_TOKEN}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax; Secure` },
+      [
+        ["set-cookie", `${AUTH_COOKIE_NAME}=${AUTH_TOKEN}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax${secureCookie}`],
+        ["set-cookie", `${USER_COOKIE_NAME}=${userId}; Path=/; Max-Age=604800; SameSite=Lax${secureCookie}`],
+      ],
     );
   }
   return json({ error: "访问密码不正确。" }, 401);
@@ -552,26 +595,29 @@ const handleRequest = async (request: Request) => {
     const authError = requireAuth(request);
     if (authError) return authError;
   }
+  const stateId = stateIdFromRequest(request);
+  const userId = normalizeUserId(parseCookie(request)[USER_COOKIE_NAME]);
 
   if (request.method === "POST" && path === "/api/auth") return handleAuth(request);
-  if (request.method === "GET" && path === "/api/state") return json(await readState());
-  if (request.method === "PUT" && path === "/api/state") return json(await writeState(await request.json()));
+  if (request.method === "GET" && path === "/api/session") return json({ ok: true, authRequired: Boolean(PUBLIC_PASSWORD), userId });
+  if (request.method === "GET" && path === "/api/state") return json(await readState(stateId));
+  if (request.method === "PUT" && path === "/api/state") return json(await writeState(await request.json(), stateId));
   if (request.method === "GET" && path === "/api/voice-memos") return json({ items: [], disabled: true });
 
   if (request.method === "POST" && path === "/api/topics") {
-    const state = await readState();
+    const state = await readState(stateId);
     const payload = await request.json();
     const topic = { id: `topic-${crypto.randomUUID().slice(0, 12)}`, name: payload.name || "Untitled", context: payload.context || "", glossary: payload.glossary || {} };
     state.topics.unshift(topic);
     state.selectedTopicId = topic.id;
     state.selectedDocId = "";
     state.expandedTopicIds = [...new Set([...(state.expandedTopicIds || []), topic.id])];
-    return json(await writeState(state), 201);
+    return json(await writeState(state, stateId), 201);
   }
 
   const topicMatch = path.match(/^\/api\/topics\/([^/]+)$/);
   if (topicMatch) {
-    const state = await readState();
+    const state = await readState(stateId);
     const topic = findTopic(state, decodeURIComponent(topicMatch[1]));
     if (!topic) return json({ error: "Topic not found" }, 404);
     if (request.method === "PUT") Object.assign(topic, await request.json());
@@ -580,12 +626,12 @@ const handleRequest = async (request: Request) => {
       state.topics = state.topics.filter((item: AnyRecord) => item.id !== topic.id);
       if (state.selectedTopicId === topic.id) state.selectedTopicId = state.topics[0]?.id || "";
     }
-    return json(await writeState(state));
+    return json(await writeState(state, stateId));
   }
 
   const docMatch = path.match(/^\/api\/docs\/([^/]+)$/);
   if (docMatch) {
-    const state = await readState();
+    const state = await readState(stateId);
     const doc = findDoc(state, decodeURIComponent(docMatch[1]));
     if (!doc) return json({ error: "Document not found" }, 404);
     if (request.method === "PUT") Object.assign(doc, await request.json());
@@ -593,11 +639,11 @@ const handleRequest = async (request: Request) => {
       state.docs = state.docs.filter((item: AnyRecord) => item.id !== doc.id);
       if (state.selectedDocId === doc.id) state.selectedDocId = "";
     }
-    return json(await writeState(state));
+    return json(await writeState(state, stateId));
   }
 
   if (request.method === "POST" && path === "/api/audio/import") {
-    const state = await readState();
+    const state = await readState(stateId);
     const form = await request.formData();
     const topic = findTopic(state, String(form.get("topicId") || ""));
     const file = form.get("audio");
@@ -617,12 +663,12 @@ const handleRequest = async (request: Request) => {
     state.selectedTopicId = topic.id;
     state.selectedDocId = doc.id;
     state.expandedTopicIds = [...new Set([...(state.expandedTopicIds || []), topic.id])];
-    await writeState(state);
+    await writeState(state, stateId);
     return json({ state, doc }, 201);
   }
 
   if (request.method === "POST" && path === "/api/realtime/start") {
-    const state = await readState();
+    const state = await readState(stateId);
     const form = await request.formData();
     const doc = findDoc(state, String(form.get("docId") || ""));
     if (!doc) return json({ error: "Document not found" }, 404);
@@ -631,7 +677,7 @@ const handleRequest = async (request: Request) => {
     doc.asrStatus = "running";
     doc.asrError = "";
     doc.segments = [];
-    await writeState(state);
+    await writeState(state, stateId);
     const jobId = `rt-${crypto.randomUUID().slice(0, 12)}`;
     const baseJob = {
       id: jobId,
@@ -645,6 +691,7 @@ const handleRequest = async (request: Request) => {
       plannedSegments: [{ start: 0, end: doc.durationSeconds || 0 }],
       asrProvider: "dashscope",
       asrError: "",
+      stateId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -693,12 +740,12 @@ const handleRequest = async (request: Request) => {
     if (path.endsWith("/cancel")) {
       job.status = "canceled";
       job.stage = "canceled";
-      const state = await readState();
+      const state = await readState(job.stateId || stateId);
       const doc = findDoc(state, job.docId || "");
       if (doc) {
         doc.asrStatus = "ready";
         doc.asrError = "";
-        await writeState(state);
+        await writeState(state, job.stateId || stateId);
       }
     }
     job.updatedAt = new Date().toISOString();
@@ -708,25 +755,40 @@ const handleRequest = async (request: Request) => {
   const calibrationMatch = path.match(/^\/api\/calibrate\/(context|file)$/);
   if (request.method === "POST" && calibrationMatch) {
     const payload = await request.json().catch(() => ({}));
-    const state = await readState();
+    const state = await readState(stateId);
     const doc = findDoc(state, String(payload.docId || ""));
     if (!doc) return json({ error: "Document not found" }, 400);
     const topic = findTopic(state, doc.topicId);
     if (!topic) return json({ error: "Topic not found" }, 400);
     if (!docReadyForCalibration(doc)) return json({ error: "语音转录完成后才可以校准。" }, 409);
-    const calibrated = calibrationMatch[1] === "context"
+    const mode = calibrationMatch[1];
+    if (mode === "file" && !doc.contextCalibratedAt && doc.calibrationMode !== "context") {
+      return json({ error: "请先完成 Context 校准，再生成 File 校准文档。" }, 409);
+    }
+    const calibrated = mode === "context"
       ? await calibrateWithContext(doc, topic, payload)
       : await calibrateWithFiles(doc, topic, state.docs || [], payload);
-    doc.segments = calibrated.segments;
-    doc.finalText = calibrated.finalText;
-    doc.calibrationMode = calibrationMatch[1];
-    doc.calibratedAt = new Date().toISOString();
-    await writeState(state);
-    return json({ state, doc });
+    let resultDoc = doc;
+    if (mode === "file") {
+      resultDoc = buildFileCalibratedDoc(doc, calibrated.segments, calibrated.finalText);
+      const sourceIndex = (state.docs || []).findIndex((item: AnyRecord) => item.id === doc.id);
+      if (sourceIndex >= 0) state.docs.splice(sourceIndex + 1, 0, resultDoc);
+      else state.docs.unshift(resultDoc);
+      state.selectedDocId = resultDoc.id;
+    } else {
+      doc.segments = calibrated.segments;
+      doc.finalText = calibrated.finalText;
+      doc.calibrationMode = "context";
+      doc.contextCalibratedAt = new Date().toISOString();
+      doc.calibratedAt = doc.contextCalibratedAt;
+      resultDoc = doc;
+    }
+    await writeState(state, stateId);
+    return json({ state, doc: resultDoc });
   }
 
   if (request.method === "POST" && path === "/api/suggestions") {
-    const state = await readState();
+    const state = await readState(stateId);
     const payload = await request.json().catch(() => ({}));
     const doc = findDoc(state, String(payload.docId || ""));
     if (!doc) return json({ error: "Document not found" }, 400);
@@ -734,11 +796,11 @@ const handleRequest = async (request: Request) => {
     if (!topic) return json({ error: "Topic not found" }, 400);
     state.targetDocument = payload.targetDocument || "";
     state.suggestions = makeSuggestions(state.targetDocument, doc, topic);
-    return json(await writeState(state));
+    return json(await writeState(state, stateId));
   }
 
   if (request.method === "POST" && path === "/api/transcribe") {
-    const state = await readState();
+    const state = await readState(stateId);
     const form = await request.formData();
     const topic = findTopic(state, String(form.get("topicId") || ""));
     const file = form.get("audio");
@@ -755,7 +817,7 @@ const handleRequest = async (request: Request) => {
     state.selectedTopicId = topic.id;
     state.selectedDocId = doc.id;
     state.suggestions = [];
-    return json(await writeState(state), 201);
+    return json(await writeState(state, stateId), 201);
   }
 
   return json({ error: `Route not implemented: ${request.method} ${path}` }, 404);

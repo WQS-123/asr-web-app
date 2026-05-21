@@ -33,9 +33,12 @@ export default async function handler(request, response) {
   });
 
   response.status(upstream.status);
+  const setCookies = typeof upstream.headers.getSetCookie === "function" ? upstream.headers.getSetCookie() : [];
   upstream.headers.forEach((value, key) => {
     if (key.toLowerCase() === "content-encoding") return;
+    if (key.toLowerCase() === "set-cookie" && setCookies.length) return;
     response.setHeader(key, value);
   });
+  if (setCookies.length) response.setHeader("set-cookie", setCookies);
   response.send(Buffer.from(await upstream.arrayBuffer()));
 }

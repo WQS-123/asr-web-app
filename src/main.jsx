@@ -3,13 +3,14 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 const AI_SETTINGS_KEY = "asr-review-studio-ai-settings-v1";
+const AI_SETTINGS_CONFIRMED_KEY = "asr-review-studio-ai-settings-confirmed-v1";
+const AUTO_CONTEXT_KEY = "asr-review-studio-auto-context-v1";
 const THEME_KEY = "asr-review-studio-theme-v1";
 const DEFAULT_AI_SETTINGS = {
   apiKey: "",
   baseUrl: "https://api.deepseek.com",
   model: "deepseek-chat"
 };
-const SUPABASE_FUNCTION_URL = "https://nsysrnnnbvodxgoooyoj.supabase.co/functions/v1/asr-api";
 
 const apiRequest = async (path, options = {}) => {
   const response = await fetch(path, options);
@@ -29,8 +30,7 @@ const apiRequest = async (path, options = {}) => {
   return payload;
 };
 
-const edgeRequest = (path, options = {}) => apiRequest(`${SUPABASE_FUNCTION_URL}${path}`, options);
-const appRequest = edgeRequest;
+const appRequest = apiRequest;
 
 const uploadFormWithProgress = (url, form, onProgress) => new Promise((resolve, reject) => {
   const request = new XMLHttpRequest();
@@ -79,11 +79,33 @@ const isCalibrationReady = (doc) => {
 
 const isAsrActive = (doc) => ["running", "paused"].includes(String(doc?.asrStatus || "").toLowerCase());
 
+const isFileCalibrationReady = (doc) => (
+  isCalibrationReady(doc) &&
+  doc?.docType !== "file-calibrated" &&
+  (Boolean(doc?.contextCalibratedAt) || doc?.calibrationMode === "context")
+);
+
 const loadAiSettings = () => {
   try {
     return { ...DEFAULT_AI_SETTINGS, ...JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "{}") };
   } catch {
     return DEFAULT_AI_SETTINGS;
+  }
+};
+
+const loadAiSettingsConfirmed = () => {
+  try {
+    return localStorage.getItem(AI_SETTINGS_CONFIRMED_KEY) === "true";
+  } catch {
+    return false;
+  }
+};
+
+const loadAutoContext = () => {
+  try {
+    return localStorage.getItem(AUTO_CONTEXT_KEY) !== "false";
+  } catch {
+    return true;
   }
 };
 
@@ -95,6 +117,19 @@ const loadTheme = () => {
   }
 };
 
+const stripReviewMarkers = (value = "") => String(value).replace(/（已检查）/g, "").trim();
+
+const escapeHtml = (value = "") => String(value)
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
+
+const safeFileName = (value = "document") => String(value || "document")
+  .replace(/[\\/:*?"<>|]+/g, "-")
+  .replace(/\s+/g, " ")
+  .trim() || "document";
+
 function App() {
   const [state, setState] = useState(null);
   const [activeDocId, setActiveDocId] = useState("");
@@ -105,7 +140,10 @@ function App() {
   const [asrBusy, setAsrBusy] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
   const [authPassword, setAuthPassword] = useState("");
+  const [authUserId, setAuthUserId] = useState("");
+  const [userId, setUserId] = useState("");
   const [topicDraft, setTopicDraft] = useState({ name: "", context: "" });
+  const [contextDraft, setContextDraft] = useState("");
   const [importDraft, setImportDraft] = useState({ topicId: "", file: null, durationSeconds: "" });
   const [segmentSeconds, setSegmentSeconds] = useState(30);
   const [activeJobId, setActiveJobId] = useState("");
@@ -116,15 +154,26 @@ function App() {
   const [dragOverDocId, setDragOverDocId] = useState("");
   const [dragOverTopicId, setDragOverTopicId] = useState("");
   const [aiSettings, setAiSettings] = useState(loadAiSettings);
+  const [aiSettingsConfirmed, setAiSettingsConfirmed] = useState(loadAiSettingsConfirmed);
+  const [autoContextEnabled, setAutoContextEnabled] = useState(loadAutoContext);
+  const [pendingAutoContextDocId, setPendingAutoContextDocId] = useState("");
   const [theme, setTheme] = useState(loadTheme);
   const [openRowMenu, setOpenRowMenu] = useState("");
   const [collapsedTopicIds, setCollapsedTopicIds] = useState([]);
+  const [calibrationFx, setCalibrationFx] = useState({ mode: "", phase: "" });
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const audioRef = useRef(null);
+  const autosaveTimersRef = useRef(new Map());
+  const autoContextAttemptedRef = useRef(new Set());
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(AUTO_CONTEXT_KEY, autoContextEnabled ? "true" : "false");
+  }, [autoContextEnabled]);
 
   const refreshState = async () => {
     try {
@@ -146,7 +195,22 @@ function App() {
   };
 
   useEffect(() => {
-    refreshState();
+    const bootstrap = async () => {
+      try {
+        const session = await appRequest("/api/session");
+        setUserId(session.userId || "");
+        if (!session.userId || session.userId === "default") {
+          setAuthRequired(true);
+          setStatus("请输入用户名进入自己的工作区");
+          return;
+        }
+        await refreshState();
+      } catch (error) {
+        setAuthRequired(true);
+        setStatus(error.status === 401 ? "请登录" : error.message);
+      }
+    };
+    bootstrap();
   }, []);
 
   useEffect(() => {
@@ -184,6 +248,19 @@ function App() {
     if (!importDraft.topicId && activeTopic?.id) setImportDraft((current) => ({ ...current, topicId: activeTopic.id }));
   }, [activeTopic?.id, importDraft.topicId]);
 
+  useEffect(() => {
+    if (modal === "context") setContextDraft(activeTopic?.context || "");
+  }, [modal, activeTopic?.id, activeTopic?.context]);
+
+  useEffect(() => {
+    setExportMenuOpen(false);
+  }, [activeDocId]);
+
+  useEffect(() => () => {
+    autosaveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    autosaveTimersRef.current.clear();
+  }, []);
+
   const updateState = async (nextState) => {
     setState(nextState);
     try {
@@ -202,13 +279,20 @@ function App() {
 
   const login = async (event) => {
     event.preventDefault();
+    const nextUserId = authUserId.trim();
+    if (!nextUserId) {
+      setStatus("请输入用户名");
+      return;
+    }
     try {
-      await apiRequest("/api/auth", {
+      const session = await apiRequest("/api/auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: authPassword })
+        body: JSON.stringify({ userId: nextUserId, password: authPassword })
       });
       setAuthPassword("");
+      setAuthUserId("");
+      setUserId(session.userId || nextUserId);
       await refreshState();
       setStatus("已登录");
     } catch (error) {
@@ -219,11 +303,13 @@ function App() {
   const selectTopic = (topic) => {
     setState((current) => ({ ...current, selectedTopicId: topic.id, selectedDocId: "" }));
     setActiveDocId("");
+    if (modal === "context") setModal("");
   };
 
   const selectDoc = (doc) => {
     setActiveDocId(doc.id);
     setState((current) => ({ ...current, selectedTopicId: doc.topicId, selectedDocId: doc.id }));
+    if (modal === "context") setModal("");
     if (audioRef.current && doc.audioUrl) audioRef.current.src = doc.audioUrl;
   };
 
@@ -266,12 +352,7 @@ function App() {
       body: JSON.stringify(fields)
     });
     setState(payload);
-    setStatus("Saved");
-  };
-
-  const saveActiveDoc = async (fields) => {
-    if (!activeDoc) return;
-    await saveDoc(activeDoc.id, fields);
+    setStatus("已保存");
   };
 
   const saveTopic = async (topicId, fields) => {
@@ -281,8 +362,47 @@ function App() {
       body: JSON.stringify(fields)
     });
     setState(payload);
-    setStatus("Saved");
+    setStatus("已保存");
   };
+
+  const queueDocSave = (docId, fields) => {
+    if (!docId) return;
+    const key = `doc:${docId}`;
+    const previous = autosaveTimersRef.current.get(key);
+    if (previous) window.clearTimeout(previous);
+    const timer = window.setTimeout(async () => {
+      autosaveTimersRef.current.delete(key);
+      try {
+        await saveDoc(docId, fields);
+      } catch (error) {
+        setStatus(`自动保存失败：${error.message}`);
+      }
+    }, 700);
+    autosaveTimersRef.current.set(key, timer);
+  };
+
+  const flushDocSave = async (docId, fields) => {
+    const key = `doc:${docId}`;
+    const previous = autosaveTimersRef.current.get(key);
+    if (previous) {
+      window.clearTimeout(previous);
+      autosaveTimersRef.current.delete(key);
+    }
+    await saveDoc(docId, fields);
+  };
+
+  useEffect(() => {
+    if (modal !== "context" || !activeTopic) return undefined;
+    if (contextDraft === (activeTopic.context || "")) return undefined;
+    const timer = window.setTimeout(async () => {
+      try {
+        await saveTopic(activeTopic.id, { context: contextDraft });
+      } catch (error) {
+        setStatus(`Context 自动保存失败：${error.message}`);
+      }
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [modal, activeTopic?.id, activeTopic?.context, contextDraft]);
 
   const renameTopic = async (topic) => {
     const name = window.prompt("文件夹名称", topic.name);
@@ -386,7 +506,7 @@ function App() {
     form.append("audio", importDraft.file);
     if (importDraft.durationSeconds) form.append("durationSeconds", importDraft.durationSeconds);
     try {
-      const result = await uploadFormWithProgress(`${SUPABASE_FUNCTION_URL}/api/audio/import`, form, (progress) => {
+      const result = await uploadFormWithProgress("/api/audio/import", form, (progress) => {
         setImportProgress(progress);
         setStatus(`音频上传中 ${progress}%`);
       });
@@ -423,7 +543,7 @@ function App() {
     form.append("segmentSeconds", String(segmentSeconds));
     form.append("durationSeconds", String(activeDoc.durationSeconds || 0));
     try {
-      const job = await edgeRequest("/api/realtime/start", { method: "POST", body: form });
+      const job = await appRequest("/api/realtime/start", { method: "POST", body: form });
       setCurrentJob(job);
       setActiveJobId(job.id);
       setStatus(job.status === "error" ? (job.asrError || "转录失败") : "转录任务已提交，云端处理中...");
@@ -487,24 +607,26 @@ function App() {
     await startRealtime();
   };
 
-  const calibrate = async (mode) => {
-    if (!activeDoc) return;
-    if (!isCalibrationReady(activeDoc)) {
+  const calibrate = async (mode, options = {}) => {
+    const doc = options.doc || activeDoc;
+    if (!doc) return;
+    if (!isCalibrationReady(doc)) {
       setStatus("语音转录完成后才可以使用校准");
       return;
     }
-    if (!aiSettings.apiKey) {
-      setModal("ai");
-      setStatus("请先填写 AI API Key");
+    if (mode === "file" && !isFileCalibrationReady(doc)) {
+      setStatus("请先完成 Context 校准，再生成 File 校准文档");
       return;
     }
-    setStatus(`${mode === "file" ? "File" : "Context"} 校准中...`);
+    if (mode === "file" && !window.confirm("生成一个新的 File 校准文档，并存放在当前文件夹中？")) return;
+    setCalibrationFx({ mode, phase: "checking" });
+    setStatus(`${options.automatic ? "自动 " : ""}${mode === "file" ? "File" : "Context"} 校准中...`);
     try {
       const result = await appRequest(`/api/calibrate/${mode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          docId: activeDoc.id,
+          docId: doc.id,
           apiKey: aiSettings.apiKey,
           baseUrl: aiSettings.baseUrl,
           model: aiSettings.model
@@ -512,9 +634,11 @@ function App() {
       });
       setState(result.state);
       setActiveDocId(result.doc.id);
-      setModal("final");
-      setStatus("校准完成");
+      setCalibrationFx({ mode, phase: "done" });
+      window.setTimeout(() => setCalibrationFx({ mode: "", phase: "" }), 1600);
+      setStatus(mode === "file" ? "File 校准文档已生成" : "Context 校准完成，已更新实时转录");
     } catch (error) {
+      setCalibrationFx({ mode: "", phase: "" });
       setStatus(error.message);
     }
   };
@@ -530,29 +654,64 @@ function App() {
     setStatus("建议已生成");
   };
 
-  const exportMarkdown = () => {
-    if (!activeDoc || !activeTopic) return;
-    const content = [
-      `# ${activeDoc.title}`,
-      "",
-      `> Folder: ${activeTopic.name}`,
-      "",
-      "## Final",
-      activeDoc.finalText || "",
-      "",
-      "## Timestamped Transcript",
-      "",
-      ...(activeDoc.segments || []).flatMap((segment) => [
-        `### [${formatTime(segment.start)}-${formatTime(segment.end)}]`,
-        segment.text,
-        ""
-      ])
-    ].join("\n");
+  useEffect(() => {
+    const doc = activeDoc;
+    if (!doc || !autoContextEnabled || doc.docType === "file-calibrated") return;
+    if (!isCalibrationReady(doc) || doc.contextCalibratedAt || doc.calibrationMode === "context") return;
+    if (calibrationFx.phase === "checking" || autoContextAttemptedRef.current.has(doc.id)) return;
+    autoContextAttemptedRef.current.add(doc.id);
+    if (!aiSettingsConfirmed) {
+      setPendingAutoContextDocId(doc.id);
+      setModal("ai");
+      setStatus("转录已完成，请先保存 AI 设置，然后自动进行 Context 校准");
+      return;
+    }
+    calibrate("context", { doc, automatic: true });
+  }, [
+    activeDoc?.id,
+    activeDoc?.asrStatus,
+    activeDoc?.segments?.length,
+    activeDoc?.contextCalibratedAt,
+    activeDoc?.calibrationMode,
+    autoContextEnabled,
+    aiSettingsConfirmed,
+    calibrationFx.phase
+  ]);
+
+  const getActiveDocumentText = () => {
+    const editor = document.querySelector("[data-document-editor='active']");
+    if (editor) return stripReviewMarkers(editor.textContent);
+    return stripReviewMarkers(activeDoc?.finalText || (activeDoc?.segments || []).map((segment) => segment.text).filter(Boolean).join("\n\n"));
+  };
+
+  const exportDocument = (format) => {
+    if (!activeDoc || activeDoc.docType !== "file-calibrated") return;
+    const title = safeFileName(activeDoc.title);
+    const text = getActiveDocumentText();
+    setExportMenuOpen(false);
+    if (format === "pdf") {
+      const printWindow = window.open("", "_blank", "width=900,height=720");
+      if (!printWindow) {
+        setStatus("浏览器拦截了 PDF 导出窗口");
+        return;
+      }
+      printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(activeDoc.title)}</title><style>body{font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:48px;color:#101828;}h1{font-size:24px;margin:0 0 24px;}main{white-space:pre-wrap;}</style></head><body><h1>${escapeHtml(activeDoc.title)}</h1><main>${escapeHtml(text)}</main></body></html>`);
+      printWindow.document.close();
+      printWindow.focus();
+      printWindow.print();
+      setStatus("请选择保存为 PDF");
+      return;
+    }
+    const isWord = format === "word";
+    const content = isWord
+      ? `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(activeDoc.title)}</title></head><body><h1>${escapeHtml(activeDoc.title)}</h1><main style="white-space:pre-wrap;line-height:1.75;">${escapeHtml(text)}</main></body></html>`
+      : [`# ${activeDoc.title}`, "", text].join("\n");
     const link = document.createElement("a");
-    link.href = URL.createObjectURL(new Blob([content], { type: "text/markdown;charset=utf-8" }));
-    link.download = `${activeDoc.title}.md`;
+    link.href = URL.createObjectURL(new Blob([content], { type: isWord ? "application/msword;charset=utf-8" : "text/markdown;charset=utf-8" }));
+    link.download = `${title}.${isWord ? "doc" : "md"}`;
     link.click();
     URL.revokeObjectURL(link.href);
+    setStatus(`已导出 ${isWord ? "Word" : "MD"}`);
   };
 
   const seekAudio = (deltaSeconds) => {
@@ -571,7 +730,8 @@ function App() {
       <main className="react-auth">
         <form onSubmit={login}>
           <div className="react-brand"><span>A</span><strong>ASR Review Studio</strong></div>
-          <label>访问密码<input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} autoFocus /></label>
+          <label>用户名<input value={authUserId} onChange={(event) => setAuthUserId(event.target.value)} autoFocus /></label>
+          <label>访问密码<input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="如已设置" /></label>
           <button className="react-primary" type="submit">进入</button>
           <p>{status}</p>
         </form>
@@ -586,14 +746,28 @@ function App() {
   const jobForActiveDoc = currentJob && currentJob.docId === activeDoc?.id ? currentJob : null;
   const activeJobStatus = String(jobForActiveDoc?.status || "").toLowerCase();
   const showRestart = Boolean(activeDoc?.audioUrl && (activeJobId || activeDoc?.segments?.length || String(activeDoc?.asrStatus || "").toLowerCase() !== "ready"));
+  const isFileDocument = activeDoc?.docType === "file-calibrated";
+  const activeDocumentText = stripReviewMarkers(activeDoc?.finalText || (activeDoc?.segments || []).map((segment) => segment.text).filter(Boolean).join("\n\n"));
 
   return (
     <main className="react-shell">
       <aside className="react-sidebar">
         <div className="react-brand"><span>A</span><strong>ASR Review Studio</strong></div>
+        {userId && (
+          <div className="react-user-chip">
+            <Icon name="user" />
+            <span>{userId}</span>
+            <button type="button" onClick={() => {
+              setAuthUserId(userId === "default" ? "" : userId);
+              setAuthRequired(true);
+              setState(null);
+              setStatus("切换用户");
+            }}>切换</button>
+          </div>
+        )}
         <div className="react-sidebar-actions">
-          <button className="react-primary" onClick={() => setModal("topic")}>新建文件夹</button>
-          <button onClick={() => setModal("import")} disabled={!topics.length}>导入音频</button>
+          <button className="react-primary" onClick={() => setModal("import")} disabled={!topics.length}>导入音频</button>
+          <button onClick={() => setModal("topic")}>新建文件夹</button>
           <button className="react-icon-text" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             <Icon name={theme === "dark" ? "sun" : "moon"} />
             {theme === "dark" ? "Light" : "Dark"}
@@ -684,7 +858,10 @@ function App() {
                   }}
                 >
                   <button className="react-file" onClick={() => selectDoc(doc)} onDoubleClick={() => renameDoc(doc)}>
-                    <span>{doc.title}</span>
+                    <span className={`react-file-type ${doc.docType === "file-calibrated" ? "calibrated" : "transcript"}`} title={doc.docType === "file-calibrated" ? "File 校准文档" : "转录文档"}>
+                      <Icon name={doc.docType === "file-calibrated" ? "fileCheck" : "mic"} />
+                    </span>
+                    <span className="react-file-title">{doc.title}</span>
                     <small>{durationLabel(doc)}</small>
                   </button>
                   <div className={`react-row-menu ${openRowMenu === `doc-${doc.id}` ? "open" : ""}`}>
@@ -743,48 +920,116 @@ function App() {
         <section className="react-transcript-card">
           <div className="react-card-heading">
             <div>
-              <span>实时转录</span>
-              <h2>{activeDoc ? asrStatusText(activeDoc) : "选择音频后开始"}</h2>
+              <span>{isFileDocument ? "校准文档" : "实时转录"}</span>
+              <h2>{activeDoc ? (isFileDocument ? "可编辑文档" : asrStatusText(activeDoc)) : "选择音频后开始"}</h2>
             </div>
           </div>
           {activeDoc?.asrError && <p className="react-error">{activeDoc.asrError}</p>}
-          <div className="react-segments">
-            {(activeDoc?.segments || []).map((segment, index) => (
-              <article key={`${segment.start}-${index}`}>
-                <button onClick={() => {
-                  if (!audioRef.current) return;
-                  audioRef.current.currentTime = Number(segment.start) || 0;
-                  audioRef.current.play().catch(() => {});
-                }}>
-                  {formatTime(segment.start)}-{formatTime(segment.end)}
-                </button>
-                <p
-                  contentEditable
-                  suppressContentEditableWarning
-                  onBlur={(event) => {
-                    const nextSegments = activeDoc.segments.map((item, itemIndex) =>
-                      itemIndex === index ? { ...item, text: event.currentTarget.textContent.trim() } : item
-                    );
-                    saveActiveDoc({ segments: nextSegments });
-                  }}
+          {isFileDocument ? (
+            <div
+              key={activeDoc.id}
+              className="react-document-editor"
+              contentEditable
+              suppressContentEditableWarning
+              data-document-editor="active"
+              onInput={(event) => {
+                queueDocSave(activeDoc.id, { finalText: event.currentTarget.textContent.trim() });
+              }}
+              onBlur={(event) => {
+                flushDocSave(activeDoc.id, { finalText: event.currentTarget.textContent.trim() });
+              }}
+            >
+              {activeDocumentText}
+            </div>
+          ) : (
+            <div className="react-segments">
+              {(activeDoc?.segments || []).map((segment, index) => (
+                <article
+                  key={`${segment.start}-${index}`}
+                  className={calibrationFx.phase ? `react-segment-${calibrationFx.phase}` : ""}
+                  style={{ "--review-delay": `${Math.min(index * 65, 900)}ms` }}
                 >
-                  {segment.text}
-                </p>
-              </article>
-            ))}
-            {!activeDoc?.segments?.length && <div className="react-empty">暂无转录片段</div>}
-          </div>
+                  <button onClick={() => {
+                    if (!audioRef.current) return;
+                    audioRef.current.currentTime = Number(segment.start) || 0;
+                    audioRef.current.play().catch(() => {});
+                  }}>
+                    {formatTime(segment.start)}-{formatTime(segment.end)}
+                  </button>
+                  <p
+                    contentEditable
+                    suppressContentEditableWarning
+                    data-segment-index={index}
+                    onInput={(event) => {
+                      const nextSegments = activeDoc.segments.map((item, itemIndex) =>
+                        itemIndex === index ? { ...item, text: event.currentTarget.textContent.trim() } : item
+                      );
+                      queueDocSave(activeDoc.id, {
+                        segments: nextSegments,
+                        finalText: nextSegments.map((item) => item.text).filter(Boolean).join("\n\n")
+                      });
+                    }}
+                    onBlur={(event) => {
+                      const nextSegments = activeDoc.segments.map((item, itemIndex) =>
+                        itemIndex === index ? { ...item, text: event.currentTarget.textContent.trim() } : item
+                      );
+                      flushDocSave(activeDoc.id, {
+                        segments: nextSegments,
+                        finalText: nextSegments.map((item) => item.text).filter(Boolean).join("\n\n")
+                      });
+                    }}
+                  >
+                    {stripReviewMarkers(segment.text)}
+                  </p>
+                </article>
+              ))}
+              {!activeDoc?.segments?.length && <div className="react-empty">暂无转录片段</div>}
+            </div>
+          )}
         </section>
 
         <nav className="react-bottom-dock" aria-label="文档工具">
-          <button onClick={() => setModal("final")} disabled={!activeDoc}>校正文档</button>
-          <button onClick={() => setModal("context")} disabled={!activeTopic}>Context</button>
-          <button onClick={() => setModal("suggestions")} disabled={!activeDoc}>建议对比</button>
-          <button disabled={!isCalibrationReady(activeDoc)} onClick={() => calibrate("context")}>Context 校准</button>
-          <button disabled={!isCalibrationReady(activeDoc)} onClick={() => calibrate("file")}>File 校准</button>
-          <button onClick={() => setModal("ai")}>AI 设置</button>
-          <button onClick={exportMarkdown} disabled={!activeDoc}>导出 MD</button>
+          {!isFileDocument && <button onClick={() => setModal("context")} disabled={!activeTopic}>Context</button>}
+          {!isFileDocument && <button disabled={!isFileCalibrationReady(activeDoc)} onClick={() => calibrate("file")}>File 校准</button>}
+          {!isFileDocument && <button onClick={() => setModal("ai")}>AI 设置</button>}
+          {isFileDocument && (
+            <div className={`react-export-group ${exportMenuOpen ? "open" : ""}`}>
+              <button type="button" onClick={() => setExportMenuOpen((open) => !open)}>导出</button>
+              {exportMenuOpen && (
+                <div className="react-export-menu" role="menu" aria-label="导出格式">
+                  <button type="button" role="menuitem" onClick={() => exportDocument("pdf")}>PDF</button>
+                  <button type="button" role="menuitem" onClick={() => exportDocument("word")}>Word</button>
+                  <button type="button" role="menuitem" onClick={() => exportDocument("md")}>MD</button>
+                </div>
+              )}
+            </div>
+          )}
         </nav>
+        {modal === "context" && activeTopic && (
+          <section className="react-context-popover" aria-label="文件夹 Context">
+            <header>
+              <div>
+                <span>{activeTopic.name}</span>
+                <h2>Context</h2>
+              </div>
+              <button className="react-icon-button" title="关闭" aria-label="关闭 Context" onClick={() => setModal("")}>×</button>
+            </header>
+            <textarea value={contextDraft} onChange={(event) => setContextDraft(event.target.value)} placeholder="写下这个文件夹的背景、术语、缩写、人物、课程主题或固定译法。" />
+            <footer>
+              <label className="react-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={autoContextEnabled}
+                  onChange={(event) => setAutoContextEnabled(event.target.checked)}
+                />
+                <span>自动 Context 校准</span>
+              </label>
+              <button className="react-primary" disabled={!isCalibrationReady(activeDoc) || calibrationFx.phase === "checking"} onClick={() => calibrate("context")}>
+                {calibrationFx.mode === "context" && calibrationFx.phase === "checking" ? "逐行检查中..." : "Context 校准"}
+              </button>
+            </footer>
+          </section>
+        )}
       </section>
 
       {modal === "topic" && (
@@ -814,16 +1059,6 @@ function App() {
           </form>
         </Modal>
       )}
-      {modal === "final" && activeDoc && (
-        <Modal title="已校正文档" onClose={() => setModal("")}>
-          <textarea defaultValue={activeDoc.finalText || ""} onBlur={(event) => saveActiveDoc({ finalText: event.currentTarget.value })} />
-        </Modal>
-      )}
-      {modal === "context" && activeTopic && (
-        <Modal title="文件夹 Context" onClose={() => setModal("")}>
-          <textarea defaultValue={activeTopic.context || ""} onBlur={(event) => saveTopic(activeTopic.id, { context: event.currentTarget.value })} />
-        </Modal>
-      )}
       {modal === "suggestions" && activeDoc && (
         <Modal title="建议对比" onClose={() => setModal("")}>
           <div className="react-suggestions">
@@ -845,13 +1080,20 @@ function App() {
       {modal === "ai" && (
         <Modal title="AI 设置" onClose={() => setModal("")}>
           <div className="react-form">
-            <label>API Key<input type="password" value={aiSettings.apiKey} onChange={(event) => setAiSettings({ ...aiSettings, apiKey: event.target.value })} /></label>
+            <label>API Key<input type="password" value={aiSettings.apiKey} onChange={(event) => setAiSettings({ ...aiSettings, apiKey: event.target.value })} placeholder="默认使用服务器 DeepSeek Secret" /></label>
             <label>Base URL<input value={aiSettings.baseUrl} onChange={(event) => setAiSettings({ ...aiSettings, baseUrl: event.target.value })} /></label>
             <label>Model<input value={aiSettings.model} onChange={(event) => setAiSettings({ ...aiSettings, model: event.target.value })} /></label>
             <button className="react-primary" onClick={() => {
               localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(aiSettings));
+              localStorage.setItem(AI_SETTINGS_CONFIRMED_KEY, "true");
+              setAiSettingsConfirmed(true);
               setModal("");
               setStatus("AI 设置已保存");
+              const pendingDoc = docs.find((doc) => doc.id === pendingAutoContextDocId);
+              setPendingAutoContextDocId("");
+              if (pendingDoc && autoContextEnabled && !pendingDoc.contextCalibratedAt && pendingDoc.calibrationMode !== "context") {
+                window.setTimeout(() => calibrate("context", { doc: pendingDoc, automatic: true }), 0);
+              }
             }}>保存</button>
           </div>
         </Modal>
@@ -926,6 +1168,27 @@ function Icon({ name }) {
         <path d="m12 6 3 3-3 3" />
         <path d="M19 15H9" />
         <path d="m12 12-3 3 3 3" />
+      </>
+    ),
+    mic: (
+      <>
+        <rect x="9" y="3" width="6" height="11" rx="3" />
+        <path d="M5 10a7 7 0 0 0 14 0" />
+        <path d="M12 17v4" />
+        <path d="M8 21h8" />
+      </>
+    ),
+    fileCheck: (
+      <>
+        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+        <path d="M14 3v5h5" />
+        <path d="m9 15 2 2 4-5" />
+      </>
+    ),
+    user: (
+      <>
+        <circle cx="12" cy="8" r="4" />
+        <path d="M4 21a8 8 0 0 1 16 0" />
       </>
     )
   };

@@ -1,5 +1,8 @@
 .runtime/
 .env
 data/
+dist/
+node_modules/
 __pycache__/
 *.pyc
+.vercel

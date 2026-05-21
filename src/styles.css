@@ -168,6 +168,41 @@ textarea {
   font-weight: 900;
 }
 
+.react-user-chip {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 7px 8px;
+}
+
+.react-user-chip svg {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+}
+
+.react-user-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.react-user-chip button {
+  min-height: 26px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+  padding: 0 4px;
+  font-size: 12px;
+}
+
 .react-folder-list,
 .react-folder {
   display: grid;
@@ -238,8 +273,8 @@ textarea {
 
 .react-file {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 6px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 8px;
   align-items: center;
   margin-left: 10px;
   border-color: transparent;
@@ -262,11 +297,31 @@ textarea {
   transform: translateY(-2px);
 }
 
-.react-file span,
+.react-file-title,
 .react-folder strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.react-file-type {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent), transparent 88%);
+  color: var(--accent);
+}
+
+.react-file-type.calibrated {
+  background: color-mix(in srgb, var(--primary), transparent 22%);
+  color: var(--primary-text);
+}
+
+.react-file-type svg {
+  width: 13px;
+  height: 13px;
 }
 
 .react-file small,
@@ -601,7 +656,8 @@ textarea {
   display: grid;
   gap: 10px;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-bottom: 24px;
 }
 
@@ -615,6 +671,24 @@ textarea {
   border-radius: 8px;
   background: var(--panel-solid);
   padding: 12px 14px;
+}
+
+.react-segments article.react-segment-checking {
+  animation: rowCheck 900ms ease-in-out var(--review-delay) both infinite;
+}
+
+.react-segments article.react-segment-done {
+  animation: rowReload 760ms cubic-bezier(0.16, 1, 0.3, 1) var(--review-delay) both;
+}
+
+.react-segments article.react-segment-checking p::after {
+  display: inline-block;
+  width: 34px;
+  margin-left: 8px;
+  color: var(--accent);
+  content: "•••";
+  letter-spacing: 2px;
+  animation: dots 800ms steps(3, end) infinite;
 }
 
 .react-segments article > button {
@@ -640,6 +714,25 @@ textarea {
   background: var(--bg-soft);
 }
 
+.react-document-editor {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-solid);
+  color: var(--text);
+  line-height: 1.85;
+  outline: none;
+  padding: 22px 24px 72px;
+  white-space: pre-wrap;
+}
+
+.react-document-editor:focus {
+  border-color: color-mix(in srgb, var(--accent), transparent 28%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent), transparent 28%);
+}
+
 .react-empty {
   display: grid;
   min-height: 80px;
@@ -658,6 +751,162 @@ textarea {
   padding: 28px;
   background: rgba(16, 24, 40, 0.28);
   backdrop-filter: blur(6px);
+}
+
+.react-context-popover {
+  position: absolute;
+  right: auto;
+  bottom: 92px;
+  left: 50%;
+  z-index: 8;
+  display: grid;
+  gap: 12px;
+  width: min(560px, calc(100% - 56px));
+  max-height: min(560px, calc(100vh - 156px));
+  transform: translateX(-50%);
+  transform-origin: bottom center;
+  border: 1px solid color-mix(in srgb, var(--border), transparent 24%);
+  border-radius: 12px;
+  background: var(--panel-solid);
+  box-shadow: 0 28px 80px rgba(16, 24, 40, 0.22);
+  padding: 14px;
+  animation: contextPop 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.react-context-popover header,
+.react-context-popover footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.react-context-popover header span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.react-context-popover h2 {
+  margin: 2px 0 0;
+  font-size: 20px;
+}
+
+.react-context-popover textarea {
+  min-height: 250px;
+  max-height: 340px;
+}
+
+.react-context-popover footer {
+  justify-content: flex-end;
+}
+
+.react-toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.react-toggle-row input {
+  width: 38px;
+  height: 22px;
+  appearance: none;
+  border: 1px solid var(--input-border);
+  border-radius: 999px;
+  background: var(--field);
+  padding: 0;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.react-toggle-row input::before {
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 1px;
+  border-radius: 50%;
+  background: var(--panel-solid);
+  box-shadow: 0 1px 4px var(--shadow);
+  content: "";
+  transition: transform 160ms ease;
+}
+
+.react-toggle-row input:checked {
+  border-color: var(--primary);
+  background: var(--primary);
+}
+
+.react-toggle-row input:checked::before {
+  transform: translateX(16px);
+}
+
+@keyframes contextPop {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(16px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+@keyframes contextPopMobile {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes rowCheck {
+  0% {
+    background: var(--panel-solid);
+    transform: translateY(0);
+  }
+  45% {
+    background: color-mix(in srgb, var(--primary), var(--panel-solid) 78%);
+    transform: translateY(-2px);
+  }
+  100% {
+    background: var(--panel-solid);
+    transform: translateY(0);
+  }
+}
+
+@keyframes rowReload {
+  0% {
+    opacity: 0.62;
+    transform: translateX(-8px) scale(0.99);
+  }
+  55% {
+    background: color-mix(in srgb, var(--accent), var(--panel-solid) 88%);
+    opacity: 1;
+    transform: translateX(3px) scale(1.006);
+  }
+  100% {
+    background: var(--panel-solid);
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes dots {
+  0% {
+    clip-path: inset(0 24px 0 0);
+  }
+  50% {
+    clip-path: inset(0 12px 0 0);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+  }
 }
 
 .react-modal {
@@ -776,6 +1025,39 @@ textarea {
   min-height: 40px;
 }
 
+.react-export-group {
+  position: relative;
+}
+
+.react-export-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  display: grid;
+  gap: 4px;
+  min-width: 112px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-solid);
+  box-shadow: 0 16px 48px var(--shadow);
+  padding: 6px;
+}
+
+.react-export-menu button {
+  min-width: 0;
+  min-height: 34px;
+  justify-content: flex-start;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.react-export-menu button:hover {
+  background: var(--field);
+  color: var(--accent);
+}
+
 @media (max-width: 980px) {
   .react-shell {
     grid-template-columns: 1fr;
@@ -812,6 +1094,15 @@ textarea {
     max-width: none;
     justify-content: flex-start;
     overflow-x: auto;
+  }
+
+  .react-context-popover {
+    right: 16px;
+    bottom: 82px;
+    left: 16px;
+    width: auto;
+    transform: none;
+    animation-name: contextPopMobile;
   }
 
   .react-bottom-dock button {
