@@ -1,0 +1,4 @@
+project_id = "replace-with-your-supabase-project-ref"
+
+[functions.asr-api]
+verify_jwt = false
