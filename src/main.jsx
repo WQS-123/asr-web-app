@@ -141,6 +141,7 @@ function App() {
   const [authRequired, setAuthRequired] = useState(false);
   const [authPassword, setAuthPassword] = useState("");
   const [authUserId, setAuthUserId] = useState("");
+  const [googleBusy, setGoogleBusy] = useState(false);
   const [userId, setUserId] = useState("");
   const [topicDraft, setTopicDraft] = useState({ name: "", context: "" });
   const [contextDraft, setContextDraft] = useState("");
@@ -196,6 +197,33 @@ function App() {
 
   useEffect(() => {
     const bootstrap = async () => {
+      if (window.location.pathname === "/auth/google/callback") {
+        setGoogleBusy(true);
+        try {
+          const params = new URLSearchParams(window.location.hash ? window.location.hash.slice(1) : window.location.search.slice(1));
+          const oauthError = params.get("error_description") || params.get("error");
+          const accessToken = params.get("access_token");
+          if (oauthError) throw new Error(oauthError);
+          if (!accessToken) throw new Error("Google 登录没有返回有效凭证。");
+          const session = await apiRequest("/api/auth/google/complete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ accessToken })
+          });
+          window.history.replaceState(null, "", "/");
+          setUserId(session.userId || "");
+          setAuthRequired(false);
+          await refreshState();
+          setStatus("已使用 Google 登录");
+        } catch (error) {
+          window.history.replaceState(null, "", "/");
+          setAuthRequired(true);
+          setStatus(`Google 登录失败：${error.message}`);
+        } finally {
+          setGoogleBusy(false);
+        }
+        return;
+      }
       try {
         const session = await appRequest("/api/session");
         setUserId(session.userId || "");
@@ -298,6 +326,11 @@ function App() {
     } catch (error) {
       setStatus(error.message);
     }
+  };
+
+  const startGoogleLogin = () => {
+    setGoogleBusy(true);
+    window.location.assign("/api/auth/google/start");
   };
 
   const selectTopic = (topic) => {
@@ -733,6 +766,9 @@ function App() {
           <label>用户名<input value={authUserId} onChange={(event) => setAuthUserId(event.target.value)} autoFocus /></label>
           <label>访问密码<input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="如已设置" /></label>
           <button className="react-primary" type="submit">进入</button>
+          <button className="react-google-button" type="button" onClick={startGoogleLogin} disabled={googleBusy}>
+            {googleBusy ? "Google 登录中..." : "使用 Google 账号注册/登录"}
+          </button>
           <p>{status}</p>
         </form>
       </main>

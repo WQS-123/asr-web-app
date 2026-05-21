@@ -24,6 +24,7 @@ export default async function handler(request, response) {
   const headers = { ...request.headers };
   delete headers.host;
   delete headers["content-length"];
+  headers["x-asr-origin"] = requestUrl.origin;
 
   const upstream = await fetch(target, {
     method: request.method,

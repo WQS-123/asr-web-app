@@ -75,7 +75,7 @@ const normalizeUserId = (value: unknown) => {
   const normalized = String(value || "default")
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/[^a-z0-9._@-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
   return normalized || "default";
@@ -568,21 +568,64 @@ const makeSuggestions = (target: string, doc: AnyRecord, topic: AnyRecord) => {
   return suggestions;
 };
 
+const authCookieHeaders = (requestUrl: string, userId: string): [string, string][] => {
+  const secureCookie = new URL(requestUrl).protocol === "https:" ? "; Secure" : "";
+  return [
+    ["set-cookie", `${AUTH_COOKIE_NAME}=${AUTH_TOKEN}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax${secureCookie}`],
+    ["set-cookie", `${USER_COOKIE_NAME}=${userId}; Path=/; Max-Age=604800; SameSite=Lax${secureCookie}`],
+  ];
+};
+
 const handleAuth = async (request: Request) => {
   const payload = await request.json().catch(() => ({}));
   const userId = normalizeUserId(payload.userId || payload.username || payload.email);
   if (!PUBLIC_PASSWORD || payload.password === PUBLIC_PASSWORD) {
-    const secureCookie = new URL(request.url).protocol === "https:" ? "; Secure" : "";
     return json(
       { ok: true, authRequired: Boolean(PUBLIC_PASSWORD), userId },
       200,
-      [
-        ["set-cookie", `${AUTH_COOKIE_NAME}=${AUTH_TOKEN}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax${secureCookie}`],
-        ["set-cookie", `${USER_COOKIE_NAME}=${userId}; Path=/; Max-Age=604800; SameSite=Lax${secureCookie}`],
-      ],
+      authCookieHeaders(request.url, userId),
     );
   }
   return json({ error: "访问密码不正确。" }, 401);
+};
+
+const handleGoogleStart = (request: Request) => {
+  if (!SUPABASE_URL) return json({ error: "Supabase URL is not configured." }, 500);
+  const requestUrl = new URL(request.url);
+  const appOrigin = request.headers.get("x-asr-origin") || requestUrl.origin;
+  const redirectTo = `${appOrigin.replace(/\/$/, "")}/auth/google/callback`;
+  const authUrl = new URL(`${SUPABASE_URL.replace(/\/$/, "")}/auth/v1/authorize`);
+  authUrl.searchParams.set("provider", "google");
+  authUrl.searchParams.set("redirect_to", redirectTo);
+  authUrl.searchParams.set("scopes", "email profile");
+  return new Response(null, {
+    status: 302,
+    headers: {
+      ...CORS_HEADERS,
+      location: authUrl.toString(),
+    },
+  });
+};
+
+const handleGoogleComplete = async (request: Request) => {
+  const payload = await request.json().catch(() => ({}));
+  const accessToken = String(payload.accessToken || "").trim();
+  if (!accessToken) return json({ error: "Google 登录缺少 access token。" }, 400);
+  const { data, error } = await supabase.auth.getUser(accessToken);
+  if (error || !data.user) return json({ error: error?.message || "Google 登录验证失败。" }, 401);
+  const user = data.user;
+  const userId = normalizeUserId(user.email || user.id);
+  return json(
+    {
+      ok: true,
+      authRequired: Boolean(PUBLIC_PASSWORD),
+      userId,
+      email: user.email || "",
+      provider: "google",
+    },
+    200,
+    authCookieHeaders(request.url, userId),
+  );
 };
 
 const handleRequest = async (request: Request) => {
@@ -591,7 +634,7 @@ const handleRequest = async (request: Request) => {
     .replace(/^\/functions\/v1\/asr-api/, "")
     .replace(/^\/asr-api/, "") || "/";
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
-  if (path !== "/api/auth") {
+  if (!path.startsWith("/api/auth")) {
     const authError = requireAuth(request);
     if (authError) return authError;
   }
@@ -599,6 +642,8 @@ const handleRequest = async (request: Request) => {
   const userId = normalizeUserId(parseCookie(request)[USER_COOKIE_NAME]);
 
   if (request.method === "POST" && path === "/api/auth") return handleAuth(request);
+  if (request.method === "GET" && path === "/api/auth/google/start") return handleGoogleStart(request);
+  if (request.method === "POST" && path === "/api/auth/google/complete") return handleGoogleComplete(request);
   if (request.method === "GET" && path === "/api/session") return json({ ok: true, authRequired: Boolean(PUBLIC_PASSWORD), userId });
   if (request.method === "GET" && path === "/api/state") return json(await readState(stateId));
   if (request.method === "PUT" && path === "/api/state") return json(await writeState(await request.json(), stateId));

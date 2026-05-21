@@ -112,6 +112,25 @@ textarea {
   color: var(--muted);
 }
 
+.react-google-button {
+  border-color: var(--border);
+  background: var(--panel-solid);
+  color: var(--text);
+}
+
+.react-google-button::before {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  margin-right: 8px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: #4285f4;
+  content: "G";
+  font-weight: 900;
+}
+
 .react-loading {
   display: grid;
   min-height: 100vh;
